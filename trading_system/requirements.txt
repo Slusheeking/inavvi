@@ -1,0 +1,57 @@
+# Core dependencies
+python-dotenv>=1.0.0
+pydantic>=2.5.2
+fastapi>=0.104.1
+uvicorn>=0.23.2
+websockets>=11.0.3
+redis>=5.0.1
+pandas>=2.1.3
+numpy>=1.26.0
+aiohttp>=3.8.6
+requests>=2.31.0
+
+# API clients
+polygon-api-client>=1.12.2
+yfinance>=0.2.29
+
+# ML / Analysis
+scikit-learn>=1.3.2
+torch>=2.1.1
+xgboost>=2.0.2
+transformers>=4.35.0
+
+# Dashboard
+dash>=2.14.1
+dash-bootstrap-components>=1.5.0
+plotly>=5.18.0
+
+# Core dependencies
+python-dotenv==1.0.0
+pydantic==2.5.2
+fastapi==0.104.1
+uvicorn==0.23.2
+websockets==11.0.3
+redis==5.0.1
+pandas==2.1.3
+numpy==1.26.0
+
+# API clients
+polygon-api-client==1.12.2
+yfinance==0.2.29
+aiohttp==3.8.6
+requests==2.31.0
+
+# Dashboard
+dash==2.14.1
+dash-bootstrap-components==1.5.0
+plotly==5.18.0
+
+# ML / Analysis
+scikit-learn==1.3.2
+torch==2.1.1
+xgboost==2.0.2
+rapids-cudf==23.10.0
+rapids-cuml==23.10.0
+
+# LLM integration
+openai==1.3.7

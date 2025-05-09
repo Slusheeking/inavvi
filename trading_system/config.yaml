@@ -1,0 +1,188 @@
+# Trading System Configuration
+
+# Application settings
+app:
+  name: "Day Trading System"
+  version: "1.0.0"
+  environment: "development"  # "development", "testing", or "production"
+  log_level: "INFO"  # "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+
+# API settings
+api:
+  # Alpaca trading API
+  alpaca_api_key: ${ALPACA_API_KEY}
+  alpaca_api_secret: ${ALPACA_API_SECRET}
+  alpaca_base_url: ${ALPACA_BASE_URL}
+  
+  # Data sources
+  polygon_api_key: ${POLYGON_API_KEY}
+  alpha_vantage_api_key: ${ALPHA_VANTAGE_API_KEY}
+  
+  # LLM providers
+  openrouter_api_key: ${OPENROUTER_API_KEY}
+
+# Database settings
+database:
+  redis_host: ${REDIS_HOST}
+  redis_port: ${REDIS_PORT}
+  redis_password: ${REDIS_PASSWORD}
+  redis_db: 0
+  timescaledb_url: ${TIMESCALEDB_URL}
+
+# Trading parameters
+trading:
+  mode: ${TRADING_MODE}  # "paper" or "live"
+  max_positions: ${MAX_POSITIONS}
+  max_position_size: ${MAX_POSITION_SIZE}  # USD
+  max_daily_risk: ${MAX_DAILY_RISK}  # USD
+  initial_universe_size: ${INITIAL_UNIVERSE_SIZE}
+  watchlist_size: ${WATCHLIST_SIZE}
+  candidate_size: ${CANDIDATE_SIZE}
+  
+  # Risk management
+  default_stop_loss_pct: 5.0
+  default_take_profit_pct: 10.0
+  default_trailing_stop_pct: 2.0
+  
+  # Trading hours
+  market_hours:
+    open: ${MARKET_OPEN}  # "09:30" Eastern Time
+    close: ${MARKET_CLOSE}  # "16:00" Eastern Time
+    pre_market_start: "04:00"  # Eastern Time
+    after_hours_end: "20:00"  # Eastern Time
+
+# Model settings
+model:
+  pattern_model_path: ${PATTERN_MODEL_PATH}
+  ranking_model_path: ${RANKING_MODEL_PATH}
+  sentiment_model_path: ${SENTIMENT_MODEL_PATH}
+  exit_model_path: ${EXIT_MODEL_PATH}
+  
+  # Model parameters
+  lookback_period: 20
+  confidence_threshold: 0.6
+  
+  # Training
+  train_test_split: 0.2
+  random_seed: 42
+  epochs: 50
+  batch_size: 32
+  learning_rate: 0.001
+
+# LLM settings
+llm:
+  model: ${LLM_MODEL}
+  max_tokens: ${LLM_MAX_TOKENS}
+  temperature: ${LLM_TEMPERATURE}
+  
+  # Prompts
+  system_prompts:
+    trade_decision: |
+      You are an expert day trader assistant specializing in short-term trading. 
+      Your goal is to analyze the provided stock data, market context, and portfolio state to 
+      make a binary trading decision (trade or do not trade) along with a specified position size. 
+      Your analysis should be concise and focus on the most relevant factors.
+      
+      Provide your response in the following JSON format:
+      {
+          "decision": "trade" or "no_trade",
+          "position_size": float (0.0 to 1.0, as a fraction of max position size),
+          "confidence": float (0.0 to 1.0),
+          "reasoning": "Brief explanation of your decision",
+          "key_factors": ["factor1", "factor2", "factor3"]
+      }
+      
+      The position_size should be 0 for no_trade decisions, and between 0.25 and 1.0 for trade decisions.
+    
+    exit_decision: |
+      You are an expert day trader assistant specializing in exit decisions. 
+      Your goal is to analyze the provided position data, current stock data, market context, 
+      and exit signals to make an exit decision. Your analysis should be concise and focus on 
+      the most relevant factors.
+      
+      Provide your response in the following JSON format:
+      {
+          "decision": "exit" or "hold",
+          "exit_size": float (0.0 to 1.0, as a fraction of current position),
+          "confidence": float (0.0 to 1.0),
+          "reasoning": "Brief explanation of your decision",
+          "key_factors": ["factor1", "factor2", "factor3"]
+      }
+      
+      The exit_size should be 0.0 for hold decisions, and between 0.25 and 1.0 for exit decisions.
+
+# Directory paths
+paths:
+  data_dir: "./data"
+  logs_dir: "./logs"
+  models_dir: "./models"
+
+# Dashboard settings
+dashboard:
+  host: "0.0.0.0"
+  port: 8050
+  theme: "darkly"  # or "flatly", "cyborg", etc.
+  update_interval: 5000  # milliseconds
+  
+  # Chart settings
+  charts:
+    candlestick:
+      height: 500
+      width: 1000
+      include_volume: true
+    
+    performance:
+      height: 400
+      width: 1000
+      colors:
+        profit: "#00FF00"
+        loss: "#FF0000"
+
+# API server settings
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  cors_origins: ["*"]
+  
+  # Websocket
+  ws_ping_interval: 5  # seconds
+  ws_heartbeat: true
+  
+  # Authentication
+  auth_enabled: false
+  jwt_secret: ""  # Only used if auth_enabled is true
+  token_expire_minutes: 1440  # 24 hours
+
+# Monitoring and notifications
+monitoring:
+  enabled: true
+  metrics_port: 8080
+  system_check_interval: 60  # seconds
+  
+  # Notifications
+  notifications:
+    slack_webhook: ""
+    email_enabled: false
+    email_recipients: []
+    
+    # Alert thresholds
+    daily_loss_threshold: 100  # USD
+    drawdown_threshold: 5.0  # percent
+    error_notification: true
+
+# Advanced settings
+advanced:
+  debug_mode: false
+  profiling: false
+  
+  # Performance optimizations
+  use_gpu: true
+  cuda_device: 0
+  parallel_workers: 4
+  
+  # Data caching
+  cache_ttl:
+    market_data: 300  # seconds
+    stock_data: 600  # seconds
+    indicators: 1800  # seconds
