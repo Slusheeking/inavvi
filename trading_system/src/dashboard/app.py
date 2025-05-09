@@ -12,154 +12,188 @@ from dash.exceptions import PreventUpdate
 import plotly.graph_objs as go
 import pandas as pd
 
+# Use absolute imports which work in all contexts
 from src.config.settings import settings
 from src.utils.logging import setup_logger
 from src.utils.redis_client import redis_client
 
+# Previously these were relative imports:
+# from ...config.settings import settings
+# from ...utils.logging import setup_logger
+# from ...utils.redis_client import redis_client
+
 # Set up logger
 logger = setup_logger("dashboard")
 
-# Initialize Dash app
-app = dash.Dash(
-    __name__,
-    external_stylesheets=[dbc.themes.DARKLY],
-    title=f"{settings.app_name} Dashboard",
-    update_title=None,
-    suppress_callback_exceptions=True
-)
-
-# ---------- Page Layout ----------
-
-app.layout = dbc.Container([
-    # Header
-    dbc.Row([
-        dbc.Col([
-            html.H2(f"{settings.app_name} Dashboard", className="mb-3 mt-3"),
-            html.Div(id="system-status", className="mb-3"),
-        ], width=12)
-    ]),
+# Define configure_app function before it's used
+def configure_app(app):
+    """
+    Configure the Dash application with layout and callbacks.
     
-    # Tabs
-    dbc.Tabs([
-        # Overview Tab
-        dbc.Tab([
-            dbc.Row([
-                # System Stats
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("System Status"),
-                        dbc.CardBody(id="system-stats-card")
-                    ], className="mb-3"),
+    Args:
+        app: Dash application instance
+    """
+    # ---------- Page Layout ----------
+    app.layout = dbc.Container([
+        # Header
+        dbc.Row([
+            dbc.Col([
+                html.H2(f"{settings.app_name} Dashboard", className="mb-3 mt-3"),
+                html.Div(id="system-status", className="mb-3"),
+            ], width=12)
+        ]),
+        
+        # Tabs
+        dbc.Tabs([
+            # Overview Tab
+            dbc.Tab([
+                dbc.Row([
+                    # System Stats
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader("System Status"),
+                            dbc.CardBody(id="system-stats-card")
+                        ], className="mb-3"),
+                        
+                        # Market Stats
+                        dbc.Card([
+                            dbc.CardHeader("Market Stats"),
+                            dbc.CardBody(id="market-stats-card")
+                        ], className="mb-3"),
+                        
+                        # Controls
+                        dbc.Card([
+                            dbc.CardHeader("Controls"),
+                            dbc.CardBody([
+                                dbc.Button("Start System", id="start-button", color="success", className="me-2"),
+                                dbc.Button("Stop System", id="stop-button", color="danger", className="me-2"),
+                                dbc.Button("Restart System", id="restart-button", color="warning"),
+                            ])
+                        ], className="mb-3"),
+                    ], width=4),
                     
-                    # Market Stats
-                    dbc.Card([
-                        dbc.CardHeader("Market Stats"),
-                        dbc.CardBody(id="market-stats-card")
-                    ], className="mb-3"),
-                    
-                    # Controls
-                    dbc.Card([
-                        dbc.CardHeader("Controls"),
-                        dbc.CardBody([
-                            dbc.Button("Start System", id="start-button", color="success", className="me-2"),
-                            dbc.Button("Stop System", id="stop-button", color="danger", className="me-2"),
-                            dbc.Button("Restart System", id="restart-button", color="warning"),
-                        ])
-                    ], className="mb-3"),
-                ], width=4),
+                    # Active Positions
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader("Active Positions"),
+                            dbc.CardBody(id="positions-card")
+                        ], className="mb-3 h-100"),
+                    ], width=8),
+                ]),
                 
-                # Active Positions
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("Active Positions"),
-                        dbc.CardBody(id="positions-card")
-                    ], className="mb-3 h-100"),
-                ], width=8),
-            ]),
+                dbc.Row([
+                    # Watchlist
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader("Watchlist"),
+                            dbc.CardBody(id="watchlist-card")
+                        ], className="mb-3"),
+                    ], width=12),
+                ]),
+            ], label="Overview", tabClassName="text-success"),
             
-            dbc.Row([
-                # Watchlist
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("Watchlist"),
-                        dbc.CardBody(id="watchlist-card")
-                    ], className="mb-3"),
-                ], width=12),
-            ]),
-        ], label="Overview", tabClassName="text-success"),
+            # Charts Tab
+            dbc.Tab([
+                dbc.Row([
+                    dbc.Col([
+                        html.H4("Stock Charts", className="mb-3"),
+                        dbc.InputGroup([
+                            dbc.InputGroupText("Symbol"),
+                            dbc.Input(id="chart-symbol-input", type="text", placeholder="Enter symbol (e.g., AAPL)"),
+                            dbc.Button("Load Chart", id="load-chart-button", color="primary"),
+                        ], className="mb-3"),
+                        dcc.Graph(id="stock-chart", style={"height": "600px"}),
+                    ], width=12),
+                ]),
+            ], label="Charts", tabClassName="text-primary"),
+            
+            # Candidates Tab
+            dbc.Tab([
+                dbc.Row([
+                    dbc.Col([
+                        html.H4("Trading Candidates", className="mb-3"),
+                        html.Div(id="candidates-table"),
+                    ], width=12),
+                ]),
+            ], label="Candidates", tabClassName="text-warning"),
+            
+            # Logs Tab
+            dbc.Tab([
+                dbc.Row([
+                    dbc.Col([
+                        html.H4("System Logs", className="mb-3"),
+                        dbc.InputGroup([
+                            dbc.InputGroupText("Log Level"),
+                            dbc.Select(
+                                id="log-level-select",
+                                options=[
+                                    {"label": "INFO", "value": "INFO"},
+                                    {"label": "WARNING", "value": "WARNING"},
+                                    {"label": "ERROR", "value": "ERROR"},
+                                    {"label": "DEBUG", "value": "DEBUG"},
+                                ],
+                                value="INFO",
+                            ),
+                            dbc.Button("Refresh Logs", id="refresh-logs-button", color="primary"),
+                        ], className="mb-3"),
+                        html.Div(id="logs-container", style={"maxHeight": "600px", "overflow": "auto"}),
+                    ], width=12),
+                ]),
+            ], label="Logs", tabClassName="text-danger"),
+        ]),
         
-        # Charts Tab
-        dbc.Tab([
-            dbc.Row([
-                dbc.Col([
-                    html.H4("Stock Charts", className="mb-3"),
-                    dbc.InputGroup([
-                        dbc.InputGroupText("Symbol"),
-                        dbc.Input(id="chart-symbol-input", type="text", placeholder="Enter symbol (e.g., AAPL)"),
-                        dbc.Button("Load Chart", id="load-chart-button", color="primary"),
-                    ], className="mb-3"),
-                    dcc.Graph(id="stock-chart", style={"height": "600px"}),
-                ], width=12),
-            ]),
-        ], label="Charts", tabClassName="text-primary"),
+        # Footer
+        dbc.Row([
+            dbc.Col([
+                html.Hr(),
+                html.P(f"© {datetime.now().year} {settings.app_name} v{settings.version}", className="text-center"),
+            ], width=12)
+        ]),
         
-        # Candidates Tab
-        dbc.Tab([
-            dbc.Row([
-                dbc.Col([
-                    html.H4("Trading Candidates", className="mb-3"),
-                    html.Div(id="candidates-table"),
-                ], width=12),
-            ]),
-        ], label="Candidates", tabClassName="text-warning"),
+        # Refresh Interval
+        dcc.Interval(
+            id="refresh-interval",
+            interval=5000,  # 5 seconds
+            n_intervals=0
+        ),
         
-        # Logs Tab
-        dbc.Tab([
-            dbc.Row([
-                dbc.Col([
-                    html.H4("System Logs", className="mb-3"),
-                    dbc.InputGroup([
-                        dbc.InputGroupText("Log Level"),
-                        dbc.Select(
-                            id="log-level-select",
-                            options=[
-                                {"label": "INFO", "value": "INFO"},
-                                {"label": "WARNING", "value": "WARNING"},
-                                {"label": "ERROR", "value": "ERROR"},
-                                {"label": "DEBUG", "value": "DEBUG"},
-                            ],
-                            value="INFO",
-                        ),
-                        dbc.Button("Refresh Logs", id="refresh-logs-button", color="primary"),
-                    ], className="mb-3"),
-                    html.Div(id="logs-container", style={"maxHeight": "600px", "overflow": "auto"}),
-                ], width=12),
-            ]),
-        ], label="Logs", tabClassName="text-danger"),
-    ]),
+        # Store for WebSocket data
+        dcc.Store(id="websocket-data", storage_type="memory"),
+        
+        # Store for session data
+        dcc.Store(id="session-data", storage_type="session"),
+        
+    ], fluid=True)
+
+def create_dashboard_app():
+    """
+    Create and configure the dashboard application.
     
-    # Footer
-    dbc.Row([
-        dbc.Col([
-            html.Hr(),
-            html.P(f"© {datetime.now().year} {settings.app_name} v{settings.version}", className="text-center"),
-        ], width=12)
-    ]),
+    Returns:
+        dash.Dash: Configured Dash application instance
+    """
+    # Initialize Dash app
+    app = dash.Dash(
+        __name__,
+        external_stylesheets=[dbc.themes.DARKLY],
+        title=f"{settings.app_name} Dashboard",
+        update_title=None,
+        suppress_callback_exceptions=True
+    )
     
-    # Refresh Interval
-    dcc.Interval(
-        id="refresh-interval",
-        interval=5000,  # 5 seconds
-        n_intervals=0
-    ),
+    # Configure app layout and callbacks
+    configure_app(app)
     
-    # Store for WebSocket data
-    dcc.Store(id="websocket-data", storage_type="memory"),
-    
-    # Store for session data
-    dcc.Store(id="session-data", storage_type="session"),
-    
-], fluid=True)
+    return app
+
+# Initialize Dash app for direct run, only if this file is run directly
+# This prevents the app from being initialized during imports
+app = None
+if __name__ == "__main__":
+    app = create_dashboard_app()
+else:
+    # Create a simple app instance for imports
+    app = dash.Dash(__name__, suppress_callback_exceptions=True)
 
 # ---------- Callbacks ----------
 

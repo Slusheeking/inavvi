@@ -6,8 +6,9 @@ of financial news and social media content.
 """
 import os
 import json
+import warnings
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,9 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from src.config.settings import settings
 from src.utils.logging import setup_logger
+
+# Filter out specific huggingface_hub warnings
+warnings.filterwarnings("ignore", message=".*`resume_download` is deprecated.*")
 
 # Set up logger
 logger = setup_logger("sentiment_model")
@@ -57,11 +61,21 @@ class FinancialSentimentModel:
         # Load model
         try:
             # If fine-tuned model exists, load it
-            if model_path and os.path.exists(model_path):
-                self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
-                logger.info(f"Loaded fine-tuned model from {model_path}")
-            else:
-                # Otherwise, load pre-trained model
+            model_loaded = False
+            if model_path:
+                # Convert to absolute path if it's a relative path
+                if not os.path.isabs(model_path):
+                    model_path = os.path.join(settings.models_dir, os.path.basename(model_path))
+                
+                # Check if it's a valid model directory with config.json
+                config_path = os.path.join(model_path, "config.json")
+                if os.path.exists(config_path):
+                    self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
+                    logger.info(f"Loaded fine-tuned model from {model_path}")
+                    model_loaded = True
+            
+            # If model wasn't loaded, use pre-trained model
+            if not model_loaded:
                 self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
                 logger.info(f"Loaded pre-trained model from {model_name}")
             

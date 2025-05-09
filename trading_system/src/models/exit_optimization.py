@@ -7,7 +7,7 @@ based on price action, indicators, and position state.
 import os
 import pickle
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -114,9 +114,14 @@ class ExitOptimizationModel:
         self.policy_network.to(device)
         
         # Load model if path is provided
-        if model_path and os.path.exists(model_path):
-            self.load_model(model_path)
-            logger.info(f"Loaded exit optimization model from {model_path}")
+        if model_path:
+            # Convert to absolute path if it's a relative path
+            if not os.path.isabs(model_path):
+                model_path = os.path.join(settings.models_dir, os.path.basename(model_path))
+            
+            if os.path.exists(model_path):
+                self.load_model(model_path)
+                logger.info(f"Loaded exit optimization model from {model_path}")
         else:
             logger.warning("No model file found, using untrained model")
         

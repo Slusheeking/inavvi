@@ -27,12 +27,19 @@ class RedisClient:
     
     def __init__(self):
         """Initialize the Redis client with connection settings from configuration."""
-        self._conn = redis.Redis(
-            host=settings.database.redis_host,
-            port=settings.database.redis_port,
-            password=settings.database.redis_password,
-            decode_responses=False,  # Keep as bytes for flexibility with different data types
-        )
+        # Create connection parameters
+        conn_params = {
+            'host': settings.database.redis_host,
+            'port': settings.database.redis_port,
+            'decode_responses': False,  # Keep as bytes for flexibility with different data types
+        }
+        
+        # Only add password if it's not empty
+        if settings.database.redis_password:
+            conn_params['password'] = settings.database.redis_password
+        
+        # Create connection
+        self._conn = redis.Redis(**conn_params)
         logger.info(f"Connected to Redis at {settings.database.redis_host}:{settings.database.redis_port}")
         
         # Test connection
@@ -232,7 +239,32 @@ class RedisClient:
         Returns:
             List of stock symbols
         """
-        return self.get("watchlist:current") or []
+        try:
+            # Get raw data from Redis
+            raw_data = self._conn.get("watchlist:current")
+            if raw_data is None:
+                return []
+            
+            # Try to deserialize as JSON
+            try:
+                watchlist = json.loads(raw_data.decode('utf-8'))
+                if isinstance(watchlist, list):
+                    return [str(symbol) for symbol in watchlist]
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+            
+            # Fallback to pickle
+            try:
+                watchlist = pickle.loads(raw_data)
+                if isinstance(watchlist, list):
+                    return [str(symbol) for symbol in watchlist]
+            except pickle.UnpicklingError:
+                pass
+            
+            return []
+        except Exception as e:
+            logger.error(f"Error getting watchlist: {e}")
+            return []
     
     def add_to_watchlist(self, symbol: str) -> bool:
         """
@@ -287,7 +319,32 @@ class RedisClient:
         Returns:
             List of candidate stocks with scores
         """
-        return self.get("candidates:ranked") or []
+        try:
+            # Get raw data from Redis
+            raw_data = self._conn.get("candidates:ranked")
+            if raw_data is None:
+                return []
+            
+            # Try to deserialize as JSON
+            try:
+                candidates = json.loads(raw_data.decode('utf-8'))
+                if isinstance(candidates, list):
+                    return candidates
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+            
+            # Fallback to pickle
+            try:
+                candidates = pickle.loads(raw_data)
+                if isinstance(candidates, list):
+                    return candidates
+            except pickle.UnpicklingError:
+                pass
+            
+            return []
+        except Exception as e:
+            logger.error(f"Error getting ranked candidates: {e}")
+            return []
     
     def add_candidate_score(self, symbol: str, score: float, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """

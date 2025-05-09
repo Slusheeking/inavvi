@@ -8,6 +8,138 @@ class PromptTemplates:
     Collection of prompt templates for LLM interactions.
     """
     
+    # Specific prompt templates
+    MARKET_ANALYSIS_PROMPT = """
+    Analyze the provided market data and identify the current market regime.
+    Consider key indicators such as volatility (VIX), market breadth, sector rotations,
+    volume patterns, and major index performance. Evaluate how these factors may impact
+    trading opportunities.
+    
+    Focus on:
+    1. Market structure (bullish, bearish, sideways)
+    2. Volatility regime (high, normal, low)
+    3. Liquidity conditions and volume patterns
+    4. Relative sector strength
+    5. Key support/resistance levels
+    
+    Provide your analysis in the following JSON format:
+    {
+        "market_regime": "bullish/bearish/range_bound/volatile/uncertain",
+        "volatility_state": "high/normal/low",
+        "key_levels": {
+            "support": [level1, level2],
+            "resistance": [level1, level2]
+        },
+        "strongest_sectors": ["sector1", "sector2"],
+        "weakest_sectors": ["sector1", "sector2"],
+        "recommendation": "brief trading approach based on current conditions",
+        "risk_level": "high/medium/low"
+    }
+    """
+    
+    PATTERN_RECOGNITION_PROMPT = """
+    Analyze the provided price action data and identify any significant technical patterns.
+    Focus on classical chart patterns, candlestick formations, and technical indicator setups
+    that may signal potential trading opportunities.
+    
+    Evaluate the following:
+    1. Chart patterns (e.g., head and shoulders, triangles, flags)
+    2. Candlestick patterns (e.g., doji, engulfing, morning star)
+    3. Support/resistance breaches
+    4. Indicator divergences (e.g., price/RSI divergence)
+    5. Volume confirmation signals
+    
+    Provide your analysis in the following JSON format:
+    {
+        "detected_patterns": [
+            {
+                "name": "pattern name",
+                "type": "reversal/continuation",
+                "confidence": float (0.0-1.0),
+                "price_target": float or null,
+                "timeframe": "intraday/daily/weekly"
+            }
+        ],
+        "key_levels": {
+            "support": [level1, level2],
+            "resistance": [level1, level2]
+        },
+        "indicator_signals": [
+            {
+                "indicator": "indicator name",
+                "signal": "bullish/bearish/neutral",
+                "strength": float (0.0-1.0)
+            }
+        ],
+        "trading_implication": "brief description of pattern significance"
+    }
+    """
+    
+    SENTIMENT_ANALYSIS_PROMPT = """
+    Analyze the provided news articles, social media data, and market sentiment indicators
+    to determine the current sentiment around the specified asset or market segment.
+    
+    Consider the following sentiment sources:
+    1. Recent news headlines and their tone
+    2. Social media sentiment (Twitter, Reddit, StockTwits)
+    3. Analyst ratings and price target changes
+    4. Options market sentiment (put/call ratio)
+    5. Institutional flows and positioning
+    
+    Provide your analysis in the following JSON format:
+    {
+        "overall_sentiment": "bullish/bearish/neutral/mixed",
+        "sentiment_score": float (-1.0 to 1.0, where -1 is extremely bearish, +1 is extremely bullish),
+        "news_sentiment": {
+            "score": float (-1.0 to 1.0),
+            "key_themes": ["theme1", "theme2"]
+        },
+        "social_sentiment": {
+            "score": float (-1.0 to 1.0),
+            "volume": "high/medium/low",
+            "key_topics": ["topic1", "topic2"]
+        },
+        "institutional_sentiment": "bullish/bearish/neutral",
+        "sentiment_change": "improving/deteriorating/stable",
+        "contrarian_indicators": ["indicator1", "indicator2"] or []
+    }
+    """
+    
+    TRADING_DECISION_PROMPT = """
+    Based on the provided market analysis, pattern recognition, sentiment analysis, and portfolio state,
+    make a trading decision for the specified asset. Consider risk parameters, current market conditions,
+    and portfolio constraints.
+    
+    Evaluate the following:
+    1. Signal strength and conviction
+    2. Market regime compatibility
+    3. Risk/reward ratio
+    4. Position sizing based on volatility
+    5. Entry timing and execution strategy
+    6. Potential exit points and stop loss levels
+    
+    Provide your decision in the following JSON format:
+    {
+        "decision": "buy/sell/hold",
+        "conviction": float (0.0-1.0),
+        "position_size": float (0.0-1.0, as fraction of max allocation),
+        "entry": {
+            "price_target": float or "market",
+            "valid_until": "time limit for entry",
+            "execution_strategy": "market/limit/conditional",
+        },
+        "exit": {
+            "stop_loss": float,
+            "take_profit": float or null,
+            "trailing_stop": float or null,
+            "time_stop": "time limit for position" or null
+        },
+        "risk_per_trade": float (dollar amount or percentage),
+        "key_reasons": ["reason1", "reason2", "reason3"],
+        "key_risks": ["risk1", "risk2"]
+    }
+    """
+    
     # System prompts
     
     SYSTEM_TRADE_DECISION = """You are an expert day trader assistant specializing in short-term trading. 
@@ -255,3 +387,91 @@ class PromptTemplates:
         }
         
         return [system_message, user_message]
+    
+    # Function to create a complete market analysis prompt
+    @staticmethod
+    def create_market_analysis_prompt(
+        market_data: Dict[str, Any],
+        market_context: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        """
+        Create a complete prompt for market analysis.
+        
+        Args:
+            market_data: Dictionary containing market data
+            market_context: Dictionary containing market context
+            
+        Returns:
+            List of message dictionaries for LLM
+        """
+        # Create system message
+        system_message = {
+            "role": "system",
+            "content": PromptTemplates.SYSTEM_MARKET_ANALYSIS
+        }
+        
+        # Create user message
+        user_content = (
+            PromptTemplates.format_stock_data(market_data) +
+            PromptTemplates.format_market_context(market_context)
+        )
+        
+        user_message = {
+            "role": "user",
+            "content": user_content
+        }
+        
+        return [system_message, user_message]
+    
+    @staticmethod
+    def get_prompt_template(task_type: str) -> str:
+        """
+        Get the appropriate prompt template for a specific task.
+        
+        Args:
+            task_type: The type of task (e.g., "market_analysis", "pattern_recognition")
+            
+        Returns:
+            The corresponding prompt template string
+            
+        Raises:
+            ValueError: If the task type is not recognized
+        """
+        task_type_mapping = {
+            "market_analysis": PromptTemplates.MARKET_ANALYSIS_PROMPT,
+            "pattern_recognition": PromptTemplates.PATTERN_RECOGNITION_PROMPT,
+            "sentiment_analysis": PromptTemplates.SENTIMENT_ANALYSIS_PROMPT,
+            "trading_decision": PromptTemplates.TRADING_DECISION_PROMPT
+        }
+        
+        if task_type not in task_type_mapping:
+            raise ValueError(f"Unknown task type: {task_type}. Available types: {list(task_type_mapping.keys())}")
+        
+        return task_type_mapping[task_type]
+    
+    @staticmethod
+    def render_prompt(template: str, data: Dict[str, Any]) -> str:
+        """
+        Format a prompt template with provided data.
+        
+        Args:
+            template: The prompt template string
+            data: A dictionary of values to insert into the template
+            
+        Returns:
+            The formatted prompt string
+            
+        Example:
+            template = "Analyze {symbol} with price {price}"
+            data = {"symbol": "AAPL", "price": 150.25}
+            result = "Analyze AAPL with price 150.25"
+        """
+        # Create a simplified template with values directly from the data dictionary
+        try:
+            return template.format(**data)
+        except KeyError as e:
+            # Handle missing keys gracefully
+            raise KeyError(f"Missing required data field: {e}")
+        except Exception as e:
+            # Handle other formatting errors
+            raise ValueError(f"Error formatting prompt template: {e}")

@@ -86,6 +86,20 @@ def setup_logger(name, log_level=None):
     
     return logger
 
+def get_logger(name, log_level=None):
+    """
+    Get or create a logger with the specified name.
+    This is a wrapper around setup_logger for consistency.
+    
+    Args:
+        name: The name of the logger
+        log_level: Optional log level (defaults to settings.logging.log_level)
+        
+    Returns:
+        A configured logger instance
+    """
+    return setup_logger(name, log_level)
+
 def log_execution_time(logger):
     """
     Decorator to log the execution time of a function.
@@ -109,3 +123,12 @@ def log_execution_time(logger):
 
 # Create main application logger
 app_logger = setup_logger("trading_system")
+
+# Export all required functions
+__all__ = [
+    "setup_logger",
+    "get_logger",
+    "log_execution_time",
+    "ColorFormatter",
+    "app_logger"
+]

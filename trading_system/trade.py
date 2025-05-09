@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import alpaca_trade_api as tradeapi
+from alpaca_trade_api.rest import TimeFrame
 
 from src.config.settings import settings
 from src.data_sources.polygon import PolygonAPI
@@ -29,6 +31,13 @@ from src.utils.redis_client import redis_client
 
 # Set up logger
 logger = setup_logger("trade")
+
+# Initialize Alpaca API
+alpaca_api = tradeapi.REST(
+    key_id=settings.api.alpaca_api_key,
+    secret_key=settings.api.alpaca_api_secret,
+    base_url=settings.api.alpaca_base_url
+)
 
 async def initialize_system():
     """Initialize the trading system."""
@@ -60,6 +69,61 @@ async def initialize_system():
     }
     redis_client.set_system_state(system_state)
     
+    # Verify Alpaca API connection
+    try:
+        account = alpaca_api.get_account()
+        logger.info(f"Connected to Alpaca API. Account status: {account.status}")
+        logger.info(f"Buying power: ${float(account.buying_power):.2f}")
+        logger.info(f"Cash: ${float(account.cash):.2f}")
+        
+        # Store account info in Redis
+        redis_client.set("account:info", {
+            "id": account.id,
+            "status": account.status,
+            "equity": float(account.equity),
+            "cash": float(account.cash),
+            "buying_power": float(account.buying_power),
+            "initial_margin": float(account.initial_margin),
+            "maintenance_margin": float(account.maintenance_margin),
+            "daytrade_count": int(account.daytrade_count),
+            "trading_blocked": account.trading_blocked,
+            "updated_at": datetime.now().isoformat()
+        })
+        
+        # Check if market is open
+        clock = alpaca_api.get_clock()
+        if clock.is_open:
+            logger.info("Market is open")
+            redis_client.set("market:state", "open")
+        else:
+            next_open = clock.next_open.strftime('%Y-%m-%d %H:%M:%S')
+            logger.info(f"Market is closed. Next open: {next_open}")
+            redis_client.set("market:state", "closed")
+        
+        # Get current positions
+        positions = alpaca_api.list_positions()
+        logger.info(f"Current positions: {len(positions)}")
+        
+        # Store positions in Redis
+        for position in positions:
+            redis_client.set_active_position(position.symbol, {
+                "symbol": position.symbol,
+                "quantity": float(position.qty),
+                "entry_price": float(position.avg_entry_price),
+                "current_price": float(position.current_price),
+                "market_value": float(position.market_value),
+                "cost_basis": float(position.cost_basis),
+                "unrealized_pnl": float(position.unrealized_pl),
+                "unrealized_pnl_pct": float(position.unrealized_plpc) * 100,
+                "side": position.side,
+                "entry_time": position.lastday_price_timestamp if hasattr(position, 'lastday_price_timestamp') else datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat()
+            })
+    
+    except Exception as e:
+        logger.error(f"Error connecting to Alpaca API: {e}")
+        return False
+    
     logger.info("System initialized successfully")
     return True
 
@@ -73,6 +137,23 @@ async def run_market_scan():
     # Get market status
     market_status = await polygon_client.get_market_status()
     redis_client.set("market:status", market_status, expiry=300)  # 5 min expiry
+    
+    # Check if market is open via Alpaca (more reliable)
+    try:
+        clock = alpaca_api.get_clock()
+        market_open = clock.is_open
+        
+        # Update Redis with market state
+        redis_client.set("market:state", "open" if market_open else "closed")
+        
+        # If market closed, log and return
+        if not market_open:
+            next_open = clock.next_open.strftime('%Y-%m-%d %H:%M:%S')
+            logger.info(f"Market is closed. Next open: {next_open}")
+            return False
+    except Exception as e:
+        logger.error(f"Error checking market status via Alpaca: {e}")
+        # Continue with polygon data as fallback
     
     # Get pre-market movers if before market open
     now = datetime.now()
@@ -142,7 +223,7 @@ async def analyze_watchlist():
             snapshot = await polygon_client.get_stock_snapshot(symbol)
             intraday_data = await polygon_client.get_intraday_bars(symbol, minutes=1, days=1)
             
-            if not snapshot or intraday_data is None or intraday_data.empty:
+            if not snapshot or not isinstance(intraday_data, pd.DataFrame) or intraday_data.empty:
                 logger.warning(f"No data for {symbol}, skipping")
                 continue
             
@@ -212,199 +293,91 @@ async def analyze_watchlist():
     
     return bool(top_candidates)
 
-async def get_market_context():
-    """Get current market context."""
-    logger.info("Getting market context...")
+async def make_trade_decisions():
+    """Make trading decisions for top candidates."""
+    logger.info("Making trade decisions...")
     
-    # Get market status
-    market_status = redis_client.get("market:status") or {}
+    # Get top candidates
+    candidates = redis_client.get_ranked_candidates()
     
-    # Get sector performance
-    sector_performance = redis_client.get("market:sectors") or {}
+    if not candidates:
+        logger.warning("No candidates available for trading")
+        return False
     
-    # Get VIX data (from cached symbols)
-    vix_data = redis_client.get_stock_data("VIX") or {}
-    vix_value = vix_data.get('price', {}).get('last', 0)
+    # Limit to top N candidates
+    top_candidates = candidates[:settings.trading.candidate_size]
     
-    # Calculate time until market close
-    now = datetime.now()
-    market_close_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {settings.timing.market_close}", 
-                                         "%Y-%m-%d %H:%M").replace(tzinfo=now.tzinfo)
-    time_until_close = (market_close_time - now).total_seconds() / 3600  # hours
-    time_until_close = max(0, time_until_close)
-    
-    # Create market context
-    context = {
-        'state': market_status.get('market', 'unknown'),
-        'sector_performance': sector_performance.get('Rank 1 Day', {}).get('Information Technology', 0),
-        'vix': vix_value,
-        'breadth': 0.5,  # Placeholder
-        'time_until_close': time_until_close
-    }
-    
-    return context
-
-async def get_portfolio_state():
-    """Get current portfolio state."""
-    logger.info("Getting portfolio state...")
-    
-    # Get active positions
-    positions = redis_client.get_all_active_positions()
-    
-    # Count positions
-    position_count = len(positions)
-    
-    # Calculate P&L
-    daily_pnl = sum(p.get('unrealized_pnl', 0) for p in positions.values())
-    
-    # Starting capital (for demo)
-    starting_capital = 5000.0
-    used_capital = sum(p.get('entry_price', 0) * p.get('quantity', 0) for p in positions.values())
-    
-    # Available capital
-    available_capital = starting_capital - used_capital
-    
-    # Daily P&L percentage
-    daily_pnl_pct = (daily_pnl / starting_capital) * 100 if starting_capital else 0
-    
-    # Risk remaining
-    max_daily_risk = settings.trading.max_daily_risk
-    risk_remaining = max_daily_risk - abs(min(0, daily_pnl))
-    
-    # Create portfolio state
-    state = {
-        'position_count': position_count,
-        'max_positions': settings.trading.max_positions,
-        'available_capital': available_capital,
-        'daily_pnl': daily_pnl,
-        'daily_pnl_pct': daily_pnl_pct,
-        'risk_remaining': risk_remaining
-    }
-    
-    return state
-
-async def make_trade_decision(candidate: dict):
-    """
-    Make a trade decision for a candidate.
-    
-    Args:
-        candidate: Candidate data
-        
-    Returns:
-        Trade decision
-    """
-    logger.info(f"Making trade decision for {candidate['symbol']}...")
+    logger.info(f"Evaluating top {len(top_candidates)} candidates")
     
     # Get market context
-    market_context = await get_market_context()
+    market_context = get_market_context()
     
     # Get portfolio state
-    portfolio_state = await get_portfolio_state()
+    portfolio_state = get_portfolio_state()
     
-    # Create input data for LLM
-    stock_data = {
-        'symbol': candidate['symbol'],
-        'price': candidate.get('price', {}),
-        'pattern': candidate.get('pattern', {}),
-        'indicators': {
-            'rsi_14': candidate.get('rsi_14', 50),
-            'macd_histogram': candidate.get('macd_histogram', 0),
-            'bb_position': candidate.get('bb_position', 0.5)
-        },
-        'sentiment': candidate.get('sentiment', {}),
-        'news': candidate.get('sentiment', {}).get('news', [])
-    }
+    # Check if we can take new positions
+    active_positions = redis_client.get_all_active_positions()
+    if len(active_positions) >= settings.trading.max_positions:
+        logger.info(f"Maximum positions reached ({len(active_positions)}/{settings.trading.max_positions})")
+        return False
     
-    # Create messages for LLM
-    messages = PromptTemplates.create_trade_decision_prompt(
-        stock_data,
-        market_context,
-        portfolio_state
-    )
-    
-    # Get decision from LLM
-    response = await openrouter_client.chat_completion(messages)
-    
-    # Parse decision
-    content = response.get('choices', [{}])[0].get('message', {}).get('content', '')
-    decision = parse_trade_decision(content)
-    
-    # Log decision
-    if decision['decision'] == 'trade':
-        logger.info(f"Decision: TRADE {candidate['symbol']} with {decision['position_size']*100:.0f}% position size")
-        logger.info(f"Reason: {decision['reasoning']}")
-    else:
-        logger.info(f"Decision: NO TRADE for {candidate['symbol']}")
-        logger.info(f"Reason: {decision['reasoning']}")
-    
-    return decision
-
-async def execute_trade(symbol: str, decision: dict):
-    """
-    Execute a trade based on decision.
-    
-    Args:
-        symbol: Stock symbol
-        decision: Trade decision
+    # Process each candidate
+    for candidate in top_candidates:
+        symbol = candidate['symbol']
         
-    Returns:
-        True if trade executed, False otherwise
-    """
-    logger.info(f"Executing trade for {symbol}...")
+        # Skip if already have a position
+        if symbol in active_positions:
+            logger.info(f"Already have a position in {symbol}, skipping")
+            continue
+        
+        try:
+            # Get stock data for LLM
+            stock_data = get_stock_data_for_llm(candidate)
+            
+            # Get LLM trade decision
+            messages = PromptTemplates.create_trade_decision_prompt(
+                stock_data, market_context, portfolio_state
+            )
+            
+            response = await openrouter_client.chat_completion(messages)
+            response_content = response.get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            # Parse decision
+            decision = parse_trade_decision(response_content)
+            
+            # If decision is to trade, execute
+            if decision["decision"] == "trade" and decision["position_size"] > 0:
+                # Calculate position size
+                position_size = calculate_position_size(
+                    decision["position_size"], 
+                    portfolio_state, 
+                    stock_data["price"]["last"]
+                )
+                
+                # Execute trade
+                success = await execute_trade(
+                    symbol, 
+                    "buy", 
+                    position_size, 
+                    stock_data["price"]["last"],
+                    decision
+                )
+                
+                if success:
+                    logger.info(f"Successfully executed trade for {symbol}")
+                    # One trade per run is enough
+                    return True
+            else:
+                logger.info(f"Decision for {symbol}: no trade. Reason: {decision['reasoning']}")
+        
+        except Exception as e:
+            logger.error(f"Error making trade decision for {symbol}: {e}")
     
-    # Get current price
-    price_data = redis_client.get_stock_data(symbol, 'price') or {}
-    current_price = price_data.get('last', 0)
-    
-    if current_price <= 0:
-        logger.error(f"Invalid price for {symbol}: {current_price}")
-        return False
-    
-    # Calculate position size
-    max_position_size = settings.trading.max_position_size
-    position_size = max_position_size * decision['position_size']
-    
-    # Calculate quantity
-    quantity = int(position_size / current_price)
-    
-    if quantity <= 0:
-        logger.warning(f"Calculated quantity is {quantity}, skipping trade")
-        return False
-    
-    # Calculate stop loss and take profit
-    stop_loss = current_price * 0.95  # 5% stop loss
-    take_profit = current_price * 1.1  # 10% take profit
-    
-    # In a real implementation, execute trade with Alpaca
-    # Here we'll just simulate it
-    
-    # Create position data
-    position_data = {
-        'symbol': symbol,
-        'entry_price': current_price,
-        'entry_time': datetime.now().isoformat(),
-        'quantity': quantity,
-        'side': 'long',
-        'stop_loss': stop_loss,
-        'take_profit': take_profit,
-        'trailing_stop': 2.0,  # 2% trailing stop
-        'max_time': 6.0,  # 6 hours max hold time
-        'unrealized_pnl': 0.0,
-        'unrealized_pnl_pct': 0.0,
-        'reason': decision['reasoning'],
-        'key_factors': decision['key_factors']
-    }
-    
-    # Save to Redis
-    redis_client.set_active_position(symbol, position_data)
-    
-    logger.info(f"Trade executed for {symbol}: {quantity} shares at ${current_price:.2f}")
-    logger.info(f"Stop loss: ${stop_loss:.2f}, Take profit: ${take_profit:.2f}")
-    
-    return True
+    logger.info("No trades executed this run")
+    return False
 
 async def monitor_positions():
-    """Monitor active positions and make exit decisions."""
+    """Monitor active positions for exit signals."""
     logger.info("Monitoring positions...")
     
     # Get active positions
@@ -412,12 +385,15 @@ async def monitor_positions():
     
     if not positions:
         logger.info("No active positions to monitor")
-        return True
+        return False
     
-    logger.info(f"Monitoring {len(positions)} positions...")
+    logger.info(f"Monitoring {len(positions)} active positions")
     
     # Create Polygon client
     polygon_client = PolygonAPI()
+    
+    # Get market context
+    market_context = get_market_context()
     
     # Process each position
     for symbol, position_data in positions.items():
@@ -426,8 +402,8 @@ async def monitor_positions():
             snapshot = await polygon_client.get_stock_snapshot(symbol)
             intraday_data = await polygon_client.get_intraday_bars(symbol, minutes=1, days=1)
             
-            if not snapshot or intraday_data is None or intraday_data.empty:
-                logger.warning(f"No data for position {symbol}, skipping")
+            if not snapshot or not isinstance(intraday_data, pd.DataFrame) or intraday_data.empty:
+                logger.warning(f"No data for {symbol}, skipping position monitoring")
                 continue
             
             # Update position P&L
@@ -437,284 +413,655 @@ async def monitor_positions():
             # Get updated position data
             position_data = redis_client.get_active_position(symbol)
             
-            # Evaluate exit conditions
-            exit_recommendation = exit_optimization_model.evaluate_exit_conditions(
-                intraday_data, position_data, confidence_threshold=0.6
+            # Check exit signals from ML model
+            exit_signals = exit_optimization_model.evaluate_exit_conditions(
+                intraday_data, position_data
             )
             
-            # Check if any exit condition is triggered
-            exit_triggered = (
-                exit_recommendation['exit'] or
-                exit_recommendation['stop_loss_triggered'] or
-                exit_recommendation['take_profit_triggered'] or
-                exit_recommendation['trailing_stop_triggered'] or
-                exit_recommendation['time_stop_triggered']
+            # Prepare data for LLM
+            current_data = get_stock_data_for_llm({
+                'symbol': symbol,
+                'price': snapshot.get('price', {}),
+                'indicators': calculate_indicators(intraday_data)
+            })
+            
+            # Get LLM exit decision
+            messages = PromptTemplates.create_exit_decision_prompt(
+                position_data, current_data, market_context, exit_signals
             )
             
-            if exit_triggered:
-                # Get market context
-                market_context = await get_market_context()
+            response = await openrouter_client.chat_completion(messages)
+            response_content = response.get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            # Parse decision
+            decision = parse_exit_decision(response_content)
+            
+            # Determine if we should exit
+            should_exit = decision["decision"] == "exit" and decision["exit_size"] > 0
+            should_exit = should_exit or exit_signals.get("stop_loss_triggered", False)
+            should_exit = should_exit or exit_signals.get("take_profit_triggered", False)
+            should_exit = should_exit or exit_signals.get("trailing_stop_triggered", False)
+            should_exit = should_exit or exit_signals.get("time_stop_triggered", False)
+            
+            # If decision is to exit, execute
+            if should_exit:
+                # Calculate exit size
+                exit_size = decision["exit_size"]
                 
-                # Create current data
-                current_data = {
-                    'symbol': symbol,
-                    'price': snapshot.get('price', {}),
-                    'indicators': {
-                        'rsi_14': 50,  # Placeholder
-                        'macd_histogram': 0,  # Placeholder
-                        'bb_position': 0.5  # Placeholder
-                    }
-                }
+                # If stop loss or take profit triggered, exit full position
+                if (exit_signals.get("stop_loss_triggered", False) or 
+                    exit_signals.get("take_profit_triggered", False) or
+                    exit_signals.get("trailing_stop_triggered", False) or
+                    exit_signals.get("time_stop_triggered", False)):
+                    exit_size = 1.0
                 
-                # Get exit decision from LLM
-                exit_decision = await get_exit_decision(
-                    position_data, current_data, market_context, exit_recommendation
+                # Calculate quantity to exit
+                quantity = position_data["quantity"] * exit_size
+                
+                # Exit reason
+                if exit_signals.get("stop_loss_triggered", False):
+                    reason = "stop_loss_triggered"
+                elif exit_signals.get("take_profit_triggered", False):
+                    reason = "take_profit_triggered"
+                elif exit_signals.get("trailing_stop_triggered", False):
+                    reason = "trailing_stop_triggered"
+                elif exit_signals.get("time_stop_triggered", False):
+                    reason = "time_stop_triggered"
+                else:
+                    reason = decision["reasoning"]
+                
+                # Execute exit
+                success = await execute_exit(
+                    symbol, 
+                    "sell", 
+                    quantity, 
+                    current_price,
+                    reason
                 )
                 
-                if exit_decision['decision'] == 'exit':
-                    await execute_exit(symbol, position_data, exit_decision)
-            
-            # Short pause to avoid rate limits
-            await asyncio.sleep(0.1)
+                if success:
+                    logger.info(f"Successfully exited position for {symbol}")
+                    
+                    # If full exit, remove from active positions
+                    if exit_size >= 0.99:  # Allow for small rounding errors
+                        redis_client.delete_active_position(symbol)
+            else:
+                logger.info(f"Decision for {symbol}: hold position")
+        
         except Exception as e:
-            logger.error(f"Error monitoring position {symbol}: {e}")
+            logger.error(f"Error monitoring position for {symbol}: {e}")
     
     return True
 
-async def get_exit_decision(
-    position_data: dict,
-    current_data: dict,
-    market_context: dict,
-    exit_signals: dict
-):
+async def execute_trade(symbol, side, quantity, price, decision):
     """
-    Get exit decision from LLM.
-    
-    Args:
-        position_data: Position data
-        current_data: Current market data
-        market_context: Market context
-        exit_signals: Exit signals
-        
-    Returns:
-        Exit decision
-    """
-    logger.info(f"Getting exit decision for {position_data['symbol']}...")
-    
-    # Create messages for LLM
-    messages = PromptTemplates.create_exit_decision_prompt(
-        position_data,
-        current_data,
-        market_context,
-        exit_signals
-    )
-    
-    # Get decision from LLM
-    response = await openrouter_client.chat_completion(messages)
-    
-    # Parse decision
-    content = response.get('choices', [{}])[0].get('message', {}).get('content', '')
-    decision = parse_exit_decision(content)
-    
-    # Log decision
-    if decision['decision'] == 'exit':
-        logger.info(f"Decision: EXIT {position_data['symbol']} with {decision['exit_size']*100:.0f}% of position")
-        logger.info(f"Reason: {decision['reasoning']}")
-    else:
-        logger.info(f"Decision: HOLD {position_data['symbol']}")
-        logger.info(f"Reason: {decision['reasoning']}")
-    
-    return decision
-
-async def execute_exit(symbol: str, position_data: dict, decision: dict):
-    """
-    Execute an exit based on decision.
+    Execute a trade via Alpaca.
     
     Args:
         symbol: Stock symbol
-        position_data: Position data
-        decision: Exit decision
+        side: Trade side ('buy' or 'sell')
+        quantity: Quantity to trade
+        price: Current price
+        decision: Trade decision dictionary
         
     Returns:
-        True if exit executed, False otherwise
+        True if successful, False otherwise
     """
-    logger.info(f"Executing exit for {symbol}...")
+    logger.info(f"Executing {side} order for {quantity} shares of {symbol} at ${price:.2f}")
     
-    # Get current price
-    price_data = redis_client.get_stock_data(symbol, 'price') or {}
-    current_price = price_data.get('last', 0)
+    # Calculate stop loss and take profit
+    entry_price = price
+    stop_loss = entry_price * (1 - settings.trading.default_stop_loss_pct / 100)
+    take_profit = entry_price * (1 + settings.trading.default_take_profit_pct / 100)
     
-    if current_price <= 0:
-        logger.error(f"Invalid price for {symbol}: {current_price}")
+    try:
+        # Submit order
+        order = alpaca_api.submit_order(
+            symbol=symbol,
+            qty=quantity,
+            side=side,
+            type='market',
+            time_in_force='day',
+            client_order_id=f"t_{int(time.time())}"
+        )
+        
+        logger.info(f"Order submitted: ID {order.id}, Status: {order.status}")
+        
+        # Store order in Redis
+        redis_client.set(f"orders:{order.id}", {
+            "id": order.id,
+            "client_order_id": order.client_order_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": float(order.qty),
+            "type": order.type,
+            "status": order.status,
+            "submitted_at": datetime.now().isoformat(),
+            "decision": decision
+        })
+        
+        # Poll for order completion
+        filled = await wait_for_order_fill(order.id)
+        
+        if filled:
+            # Get filled price
+            order = alpaca_api.get_order(order.id)
+            filled_price = float(order.filled_avg_price)
+            
+            logger.info(f"Order filled at ${filled_price:.2f}")
+            
+            # Create position entry
+            position_data = {
+                "symbol": symbol,
+                "entry_price": filled_price,
+                "entry_time": datetime.now().isoformat(),
+                "quantity": float(order.qty),
+                "side": side,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "trailing_stop": settings.trading.default_trailing_stop_pct,
+                "max_time": 4.0,  # 4 hours max hold time
+                "order_id": order.id,
+                "decision": decision,
+                "updated_at": datetime.now().isoformat()
+            }
+            
+            # Store in Redis
+            redis_client.set_active_position(symbol, position_data)
+            
+            return True
+        else:
+            logger.warning(f"Order for {symbol} did not fill within timeout")
+            return False
+    
+    except Exception as e:
+        logger.error(f"Error executing trade for {symbol}: {e}")
         return False
+
+async def execute_exit(symbol, side, quantity, price, reason):
+    """
+    Execute an exit trade via Alpaca.
     
-    # Get position quantity
-    quantity = position_data.get('quantity', 0)
+    Args:
+        symbol: Stock symbol
+        side: Trade side ('buy' or 'sell')
+        quantity: Quantity to trade
+        price: Current price
+        reason: Exit reason
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    logger.info(f"Executing {side} order to exit {quantity} shares of {symbol} at ${price:.2f}")
+    logger.info(f"Exit reason: {reason}")
     
-    # Calculate exit quantity
-    exit_quantity = int(quantity * decision['exit_size'])
+    try:
+        # Submit order
+        order = alpaca_api.submit_order(
+            symbol=symbol,
+            qty=quantity,
+            side=side,
+            type='market',
+            time_in_force='day',
+            client_order_id=f"e_{int(time.time())}"
+        )
+        
+        logger.info(f"Exit order submitted: ID {order.id}, Status: {order.status}")
+        
+        # Store order in Redis
+        redis_client.set(f"orders:{order.id}", {
+            "id": order.id,
+            "client_order_id": order.client_order_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": float(order.qty),
+            "type": order.type,
+            "status": order.status,
+            "submitted_at": datetime.now().isoformat(),
+            "reason": reason
+        })
+        
+        # Poll for order completion
+        filled = await wait_for_order_fill(order.id)
+        
+        if filled:
+            # Get filled price
+            order = alpaca_api.get_order(order.id)
+            filled_price = float(order.filled_avg_price)
+            
+            logger.info(f"Exit order filled at ${filled_price:.2f}")
+            
+            # Get original position
+            position = redis_client.get_active_position(symbol)
+            
+            # Calculate P&L
+            if position:
+                entry_price = position.get("entry_price", 0)
+                pnl = (filled_price - entry_price) * float(order.qty)
+                pnl_pct = (filled_price / entry_price - 1) * 100 if entry_price else 0
+                
+                logger.info(f"P&L for {symbol}: ${pnl:.2f} ({pnl_pct:.2f}%)")
+                
+                # Store trade in history
+                trade_history = {
+                    "symbol": symbol,
+                    "entry_price": entry_price,
+                    "exit_price": filled_price,
+                    "quantity": float(order.qty),
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
+                    "entry_time": position.get("entry_time", ""),
+                    "exit_time": datetime.now().isoformat(),
+                    "reason": reason
+                }
+                
+                # Store in Redis
+                redis_client.set(f"history:trades:{int(time.time())}", trade_history)
+                
+                # Update position if partial exit
+                remaining_quantity = position.get("quantity", 0) - float(order.qty)
+                
+                if remaining_quantity > 0.01:  # Small threshold for rounding errors
+                    position["quantity"] = remaining_quantity
+                    position["updated_at"] = datetime.now().isoformat()
+                    redis_client.set_active_position(symbol, position)
+                    logger.info(f"Updated position for {symbol}: {remaining_quantity} shares remaining")
+                else:
+                    # Remove position if fully exited
+                    redis_client.delete_active_position(symbol)
+                    logger.info(f"Removed position for {symbol} (fully exited)")
+            
+            return True
+        else:
+            logger.warning(f"Exit order for {symbol} did not fill within timeout")
+            return False
     
-    if exit_quantity <= 0:
-        logger.warning(f"Calculated exit quantity is {exit_quantity}, skipping exit")
+    except Exception as e:
+        logger.error(f"Error executing exit for {symbol}: {e}")
         return False
+
+async def wait_for_order_fill(order_id, timeout=60):
+    """
+    Wait for an order to be filled.
     
-    # In a real implementation, execute exit with Alpaca
-    # Here we'll just simulate it
+    Args:
+        order_id: Alpaca order ID
+        timeout: Timeout in seconds
+        
+    Returns:
+        True if filled, False if still open after timeout
+    """
+    start_time = time.time()
     
-    if exit_quantity >= quantity:
-        # Full exit
-        logger.info(f"Full exit executed for {symbol}: {quantity} shares at ${current_price:.2f}")
-        redis_client.delete_active_position(symbol)
-    else:
-        # Partial exit
-        remaining_quantity = quantity - exit_quantity
+    while time.time() - start_time < timeout:
+        try:
+            order = alpaca_api.get_order(order_id)
+            
+            if order.status == 'filled':
+                return True
+            
+            if order.status in ['canceled', 'expired', 'rejected', 'suspended']:
+                logger.warning(f"Order {order_id} status: {order.status}")
+                return False
+            
+            # Wait before checking again
+            await asyncio.sleep(1)
+            
+        except Exception as e:
+            logger.error(f"Error checking order status: {e}")
+            return False
+    
+    return False
+
+def calculate_position_size(size_factor, portfolio_state, current_price):
+    """
+    Calculate the position size in shares.
+    
+    Args:
+        size_factor: Size factor (0.0 to 1.0)
+        portfolio_state: Portfolio state dictionary
+        current_price: Current stock price
         
-        # Update position data
-        position_data['quantity'] = remaining_quantity
+    Returns:
+        Position size in shares
+    """
+    # Get maximum position size
+    max_position_size = min(
+        settings.trading.max_position_size,
+        portfolio_state["available_capital"] * 0.9  # Leave some buffer
+    )
+    
+    # Calculate dollar amount
+    dollar_amount = max_position_size * size_factor
+    
+    # Calculate shares (round down)
+    shares = int(dollar_amount / current_price)
+    
+    # Ensure minimum position size
+    if shares < 1:
+        shares = 1
+    
+    return shares
+
+def get_market_context():
+    """
+    Get current market context.
+    
+    Returns:
+        Market context dictionary
+    """
+    # Get market status
+    market_status = redis_client.get("market:status") or {}
+    market_state = market_status.get("market", "unknown")
+    
+    # Get sector performance
+    sectors = redis_client.get("market:sectors") or {}
+    sector_perf = sectors.get("Rank A: Real-Time Performance", {}).get("Information Technology", 0)
+    
+    # Get time until market close
+    now = datetime.now()
+    market_close_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {settings.timing.market_close}", 
+                                         "%Y-%m-%d %H:%M").replace(tzinfo=now.tzinfo)
+    time_until_close = (market_close_time - now).total_seconds() / 3600  # Hours
+    time_until_close = max(0, time_until_close)
+    
+    # Assemble context
+    context = {
+        "state": market_state,
+        "sector_performance": sector_perf,
+        "vix": 15.0,  # Placeholder, would get from data source
+        "breadth": 0.65,  # Placeholder, would calculate from market data
+        "time_until_close": time_until_close
+    }
+    
+    return context
+
+def get_portfolio_state():
+    """
+    Get current portfolio state.
+    
+    Returns:
+        Portfolio state dictionary
+    """
+    # Get account info
+    account_info = redis_client.get("account:info") or {}
+    
+    # Get positions
+    positions = redis_client.get_all_active_positions()
+    
+    # Calculate daily P&L
+    daily_pnl = sum([pos.get("unrealized_pnl", 0) for pos in positions.values()])
+    daily_pnl_pct = daily_pnl / float(account_info.get("equity", 1)) * 100
+    
+    # Calculate available capital
+    available_capital = float(account_info.get("buying_power", 0)) / 4  # For day trading
+    
+    # Calculate risk remaining
+    max_daily_risk = settings.trading.max_daily_risk
+    risk_remaining = max_daily_risk + daily_pnl if daily_pnl < 0 else max_daily_risk
+    
+    # Assemble state
+    state = {
+        "position_count": len(positions),
+        "max_positions": settings.trading.max_positions,
+        "available_capital": available_capital,
+        "daily_pnl": daily_pnl,
+        "daily_pnl_pct": daily_pnl_pct,
+        "risk_remaining": risk_remaining
+    }
+    
+    return state
+
+def get_stock_data_for_llm(candidate):
+    """
+    Prepare stock data for LLM consumption.
+    
+    Args:
+        candidate: Candidate dictionary
         
-        # Save to Redis
-        redis_client.set_active_position(symbol, position_data)
+    Returns:
+        Stock data dictionary formatted for LLM
+    """
+    return {
+        "symbol": candidate["symbol"],
+        "price": candidate.get("price", {}),
+        "indicators": candidate.get("indicators", {}),
+        "pattern": candidate.get("pattern", {}),
+        "sentiment": candidate.get("sentiment", {}),
+        "news": candidate.get("sentiment", {}).get("news", [])
+    }
+
+def calculate_indicators(ohlcv_data):
+    """
+    Calculate technical indicators for a stock.
+    
+    Args:
+        ohlcv_data: OHLCV DataFrame
         
-        logger.info(f"Partial exit executed for {symbol}: {exit_quantity} shares at ${current_price:.2f}")
-        logger.info(f"Remaining position: {remaining_quantity} shares")
+    Returns:
+        Dictionary of indicators
+    """
+    if not isinstance(ohlcv_data, pd.DataFrame) or ohlcv_data.empty:
+        return {}
+    
+    try:
+        # Calculate RSI
+        delta = ohlcv_data['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        
+        rs = avg_gain / avg_loss
+        rsi_14 = 100 - (100 / (1 + rs))
+        
+        # Calculate Bollinger Bands
+        bb_middle = ohlcv_data['close'].rolling(20).mean()
+        bb_std = ohlcv_data['close'].rolling(20).std()
+        bb_upper = bb_middle + 2 * bb_std
+        bb_lower = bb_middle - 2 * bb_std
+        
+        bb_position = (ohlcv_data['close'].iloc[-1] - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1])
+        
+        # Calculate MACD
+        ema_12 = ohlcv_data['close'].ewm(span=12, adjust=False).mean()
+        ema_26 = ohlcv_data['close'].ewm(span=26, adjust=False).mean()
+        macd = ema_12 - ema_26
+        macd_signal = macd.ewm(span=9, adjust=False).mean()
+        macd_histogram = macd - macd_signal
+        
+        # Assemble indicators
+        indicators = {
+            "rsi_14": float(rsi_14.iloc[-1]),
+            "bb_upper": float(bb_upper.iloc[-1]),
+            "bb_lower": float(bb_lower.iloc[-1]),
+            "bb_middle": float(bb_middle.iloc[-1]),
+            "bb_position": float(bb_position),
+            "macd": float(macd.iloc[-1]),
+            "macd_signal": float(macd_signal.iloc[-1]),
+            "macd_histogram": float(macd_histogram.iloc[-1])
+        }
+        
+        return indicators
+    except Exception as e:
+        logger.error(f"Error calculating indicators: {e}")
+        return {}
+
+async def close_all_positions():
+    """Close all open positions at the end of the day."""
+    logger.info("Closing all positions for end of day...")
+    
+    # Get active positions
+    positions = redis_client.get_all_active_positions()
+    
+    if not positions:
+        logger.info("No active positions to close")
+        return True
+    
+    logger.info(f"Closing {len(positions)} active positions")
+    
+    # Process each position
+    for symbol, position_data in positions.items():
+        try:
+            # Get current price
+            price_data = redis_client.get_stock_data(symbol, 'price')
+            
+            if not price_data or 'price' not in price_data:
+                # Use last known price from position data
+                current_price = position_data.get('current_price', 0)
+            else:
+                current_price = price_data.get('price', {}).get('last', 0)
+            
+            # Exit position
+            quantity = position_data["quantity"]
+            
+            # Execute exit
+            success = await execute_exit(
+                symbol, 
+                "sell", 
+                quantity, 
+                current_price,
+                "end_of_day"
+            )
+            
+            if success:
+                logger.info(f"Successfully closed position for {symbol}")
+            else:
+                logger.warning(f"Failed to close position for {symbol}")
+        
+        except Exception as e:
+            logger.error(f"Error closing position for {symbol}: {e}")
     
     return True
 
-async def trading_loop():
-    """Main trading loop."""
-    logger.info("Starting trading loop...")
+async def run_trading_cycle():
+    """Run a complete trading cycle."""
+    logger.info("Starting trading cycle...")
     
     # Initialize system
     initialized = await initialize_system()
+    
     if not initialized:
         logger.error("System initialization failed")
         return False
     
-    # Set system state to running
-    redis_client.update_system_state(state="running")
+    # Update system state
+    redis_client.update_system_state(state="running", timestamp=datetime.now().isoformat())
+    
+    # Check market status
+    try:
+        clock = alpaca_api.get_clock()
+        if not clock.is_open:
+            next_open = clock.next_open.strftime('%Y-%m-%d %H:%M:%S')
+            logger.info(f"Market is closed. Next open: {next_open}")
+            return False
+    except Exception as e:
+        logger.error(f"Error checking market status: {e}")
+        # Continue without market status check
+    
+    # Run market scan
+    await run_market_scan()
+    
+    # Analyze watchlist
+    await analyze_watchlist()
+    
+    # Monitor existing positions
+    await monitor_positions()
+    
+    # Make trade decisions
+    await make_trade_decisions()
+    
+    # Check if market close is approaching
+    now = datetime.now()
+    market_close_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {settings.timing.market_close}", 
+                                         "%Y-%m-%d %H:%M").replace(tzinfo=now.tzinfo)
+    
+    # If within 10 minutes of market close, close all positions
+    if (market_close_time - now).total_seconds() < 600:  # 10 minutes
+        logger.info("Market close approaching, closing all positions")
+        await close_all_positions()
+    
+    # Update system state
+    redis_client.update_system_state(state="idle", timestamp=datetime.now().isoformat())
+    
+    logger.info("Trading cycle completed")
+    return True
+
+async def main_loop():
+    """Main trading loop."""
+    logger.info("Starting main trading loop...")
     
     try:
-        # Initial market scan
-        await run_market_scan()
+        # Run initial system setup
+        initialized = await initialize_system()
+        
+        if not initialized:
+            logger.error("System initialization failed")
+            return
         
         # Main loop
         while True:
-            # Check if market is open
-            now = datetime.now()
-            market_open_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {settings.timing.market_open}", 
-                                               "%Y-%m-%d %H:%M").replace(tzinfo=now.tzinfo)
-            market_close_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {settings.timing.market_close}", 
-                                                "%Y-%m-%d %H:%M").replace(tzinfo=now.tzinfo)
-            
-            if now < market_open_time:
-                # Pre-market
-                logger.info("Market not open yet, waiting...")
-                wait_seconds = (market_open_time - now).total_seconds()
-                await asyncio.sleep(min(wait_seconds, 300))  # Wait at most 5 minutes
-                continue
-            
-            if now > market_close_time:
-                # Post-market
-                logger.info("Market closed, closing all positions...")
+            try:
+                # Run trading cycle
+                await run_trading_cycle()
                 
-                # Close all positions
-                positions = redis_client.get_all_active_positions()
-                for symbol, position_data in positions.items():
-                    exit_decision = {
-                        'decision': 'exit',
-                        'exit_size': 1.0,
-                        'confidence': 1.0,
-                        'reasoning': 'Market close',
-                        'key_factors': ['market_close']
-                    }
-                    await execute_exit(symbol, position_data, exit_decision)
-                
-                # Wait until next day
-                tomorrow = now + timedelta(days=1)
-                tomorrow_open = datetime.strptime(f"{tomorrow.strftime('%Y-%m-%d')} {settings.timing.market_open}", 
-                                               "%Y-%m-%d %H:%M").replace(tzinfo=now.tzinfo)
-                wait_seconds = (tomorrow_open - now).total_seconds()
-                logger.info(f"Waiting until next market open: {tomorrow_open}")
-                await asyncio.sleep(min(wait_seconds, 3600))  # Wait at most 1 hour
-                continue
+                # Wait before next cycle
+                logger.info("Waiting for next cycle...")
+                await asyncio.sleep(60)  # 1-minute cycle
             
-            # Market is open
-            
-            # Monitor existing positions
-            await monitor_positions()
-            
-            # Check if we can open new positions
-            positions = redis_client.get_all_active_positions()
-            if len(positions) >= settings.trading.max_positions:
-                logger.info(f"Maximum positions reached ({len(positions)}), skipping new trades")
-                await asyncio.sleep(60)  # Check again in 1 minute
-                continue
-            
-            # Analyze watchlist for new opportunities
-            has_candidates = await analyze_watchlist()
-            
-            if has_candidates:
-                # Get top candidate
-                candidates = redis_client.get_ranked_candidates()
-                top_candidate = candidates[0]
-                
-                # Make trade decision
-                decision = await make_trade_decision(top_candidate)
-                
-                if decision['decision'] == 'trade' and decision['position_size'] > 0:
-                    # Execute trade
-                    await execute_trade(top_candidate['symbol'], decision)
-            
-            # Wait before next iteration
-            await asyncio.sleep(60)  # Check every minute
-            
+            except Exception as e:
+                logger.error(f"Error in trading cycle: {e}")
+                await asyncio.sleep(60)  # Wait before retry
+    
     except KeyboardInterrupt:
-        logger.info("Trading loop interrupted by user")
-    except Exception as e:
-        logger.error(f"Error in trading loop: {e}")
-        redis_client.update_system_state(state="error", error=str(e))
-    finally:
-        # Set system state to stopped
-        redis_client.update_system_state(state="stopped")
+        logger.info("Manual interrupt received, shutting down...")
         
-        # Close client connections
+        # Close all positions on shutdown
+        await close_all_positions()
+        
+        # Close API clients
         await alpha_vantage_client.close()
-        await openrouter_client.close()
-        
-        logger.info("Trading loop stopped")
+        if hasattr(openrouter_client, 'close') and callable(openrouter_client.close):
+            await openrouter_client.close()
     
-    return True
+    except Exception as e:
+        logger.error(f"Unhandled exception in main loop: {e}")
+    
+    finally:
+        # Final cleanup
+        logger.info("Trading system shutdown complete")
 
-async def backtest_mode():
-    """Run system in backtest mode."""
-    logger.info("Starting backtest mode...")
-    
-    # TODO: Implement backtesting logic
-    
-    logger.info("Backtesting not implemented yet")
-    return False
-
-async def main():
-    """Main entry point."""
-    # Parse command line arguments
+def parse_args():
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Day Trading System")
-    parser.add_argument("--backtest", action="store_true", help="Run in backtest mode")
-    parser.add_argument("--initialize", action="store_true", help="Initialize system and exit")
-    args = parser.parse_args()
     
-    if args.initialize:
-        # Just initialize the system
-        await initialize_system()
-        return
+    parser.add_argument("--cycle", action="store_true", help="Run a single trading cycle")
+    parser.add_argument("--scan", action="store_true", help="Run market scan only")
+    parser.add_argument("--analyze", action="store_true", help="Analyze watchlist only")
+    parser.add_argument("--monitor", action="store_true", help="Monitor positions only")
+    parser.add_argument("--trade", action="store_true", help="Make trade decisions only")
+    parser.add_argument("--close", action="store_true", help="Close all positions")
     
-    if args.backtest:
-        # Run in backtest mode
-        await backtest_mode()
-        return
-    
-    # Run trading loop
-    await trading_loop()
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    # Run main function
-    asyncio.run(main())
+    # Parse arguments
+    args = parse_args()
+    
+    # Run based on arguments
+    if args.cycle:
+        asyncio.run(run_trading_cycle())
+    elif args.scan:
+        asyncio.run(run_market_scan())
+    elif args.analyze:
+        asyncio.run(analyze_watchlist())
+    elif args.monitor:
+        asyncio.run(monitor_positions())
+    elif args.trade:
+        asyncio.run(make_trade_decisions())
+    elif args.close:
+        asyncio.run(close_all_positions())
+    else:
+        # Run main loop
+        asyncio.run(main_loop())

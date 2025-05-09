@@ -4,7 +4,8 @@ Configuration settings for the trading system.
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Union
-from pydantic import BaseSettings, Field, validator
+from pydantic import Field, validator
+from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -24,9 +25,11 @@ class APISettings(BaseSettings):
     alpaca_api_secret: str = Field(..., env="ALPACA_API_SECRET")
     alpaca_base_url: str = Field(..., env="ALPACA_BASE_URL")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "allow",
+    }
 
 class DatabaseSettings(BaseSettings):
     """Database connection settings."""
@@ -35,9 +38,11 @@ class DatabaseSettings(BaseSettings):
     redis_password: Optional[str] = Field(None, env="REDIS_PASSWORD")
     timescaledb_url: str = Field(..., env="TIMESCALEDB_URL")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "allow",
+    }
 
 class LLMSettings(BaseSettings):
     """LLM configuration settings."""
@@ -45,9 +50,11 @@ class LLMSettings(BaseSettings):
     max_tokens: int = Field(4096, env="LLM_MAX_TOKENS")
     temperature: float = Field(0.1, env="LLM_TEMPERATURE")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "allow",
+    }
 
 class TradingSettings(BaseSettings):
     """Trading configuration settings."""
@@ -65,9 +72,11 @@ class TradingSettings(BaseSettings):
             raise ValueError("trading_mode must be either 'paper' or 'live'")
         return v
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "allow",
+    }
 
 class TimingSettings(BaseSettings):
     """Market timing settings."""
@@ -76,9 +85,11 @@ class TimingSettings(BaseSettings):
     pre_market_scan: str = Field("08:30", env="PRE_MARKET_SCAN")
     post_market_analysis: str = Field("16:30", env="POST_MARKET_ANALYSIS")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "allow",
+    }
 
 class ModelSettings(BaseSettings):
     """ML model settings."""
@@ -87,9 +98,11 @@ class ModelSettings(BaseSettings):
     sentiment_model_path: str = Field("models/sentiment_model.pt", env="SENTIMENT_MODEL_PATH")
     exit_model_path: str = Field("models/exit_optimization.pt", env="EXIT_MODEL_PATH")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "allow",
+    }
 
 class LoggingSettings(BaseSettings):
     """Logging configuration settings."""
@@ -102,9 +115,11 @@ class LoggingSettings(BaseSettings):
             raise ValueError("log_level must be a valid Python logging level")
         return v
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "allow",
+    }
 
 class Settings(BaseSettings):
     """Main settings class that combines all configurations."""

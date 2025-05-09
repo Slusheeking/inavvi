@@ -1,8 +1,8 @@
 """
-OpenRouter API client for LLM integration.
+LLM Router for integrating multiple LLM providers.
 
-This module provides functions for interacting with the OpenRouter API
-to get LLM responses for trade decisions.
+This module provides classes and functions for routing LLM requests to different
+providers and models based on the task type and other criteria.
 """
 import json
 import time
@@ -374,6 +374,230 @@ class OpenRouterClient:
                 "key_factors": [],
                 "raw_response": response
             }
+    
+    async def get_market_analysis(
+        self,
+        market_data: Dict[str, Any],
+        market_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Get market analysis from LLM.
+        
+        Args:
+            market_data: Dictionary containing market data
+            market_context: Dictionary containing market context
+            
+        Returns:
+            Market analysis with regime identification and recommendations
+        """
+        from .prompts import PromptTemplates
+        from .parsing import parse_market_analysis
+        
+        # Generate prompt using PromptTemplates
+        messages = PromptTemplates.create_market_analysis_prompt(
+            market_data=market_data,
+            market_context=market_context
+        )
+        
+        # Make request to OpenRouter
+        response = await self.chat_completion(messages)
+        
+        # Parse response
+        try:
+            content = response.get('choices', [{}])[0].get('message', {}).get('content', '')
+            return parse_market_analysis(content)
+        except Exception as e:
+            logger.error(f"Error processing market analysis response: {e}")
+            return {
+                "market_regime": "uncertain",
+                "confidence": 0.0,
+                "reasoning": f"Error: {str(e)}",
+                "key_indicators": [],
+                "trading_recommendation": "Proceed with caution",
+                "raw_response": response
+            }
 
-# Create a global instance of the client
+class LLMRouter:
+    """
+    Router for LLM requests that distributes tasks between different LLM providers
+    and models based on task type and other criteria.
+    
+    This class manages multiple LLM clients (like OpenRouterClient) and routes
+    requests to appropriate models based on task type, optimizing for cost,
+    performance, and specialized capabilities.
+    """
+    
+    # Task type constants
+    TASK_TRADE_DECISION = "trade_decision"
+    TASK_EXIT_DECISION = "exit_decision"
+    TASK_MARKET_ANALYSIS = "market_analysis"
+    
+    def __init__(self, main_llm_client=None, trade_llm_client=None):
+        """
+        Initialize the LLM router.
+        
+        Args:
+            main_llm_client: Client for main LLM interactions (default OpenRouterClient)
+            trade_llm_client: Client for trade-specific LLM interactions
+        """
+        # Initialize clients
+        self.main_llm_client = main_llm_client or OpenRouterClient()
+        self.trade_llm_client = trade_llm_client or self.main_llm_client
+        
+        # Task to LLM client mapping
+        self.task_routing = {
+            self.TASK_TRADE_DECISION: self.trade_llm_client,
+            self.TASK_EXIT_DECISION: self.trade_llm_client,
+            self.TASK_MARKET_ANALYSIS: self.main_llm_client
+        }
+        
+        logger.info("LLM Router initialized with:")
+        logger.info(f"- Main LLM: {self.main_llm_client.default_model}")
+        if self.trade_llm_client != self.main_llm_client:
+            logger.info(f"- Trade LLM: {self.trade_llm_client.default_model}")
+        else:
+            logger.info("- Trade LLM: Using Main LLM")
+    
+    async def close(self):
+        """Close all client connections."""
+        await self.main_llm_client.close()
+        if self.trade_llm_client != self.main_llm_client:
+            await self.trade_llm_client.close()
+    
+    def get_client_for_task(self, task_type: str) -> OpenRouterClient:
+        """
+        Get the appropriate LLM client for a specific task.
+        
+        Args:
+            task_type: Type of task (use class constants)
+            
+        Returns:
+            OpenRouterClient: The appropriate client for the task
+        """
+        return self.task_routing.get(task_type, self.main_llm_client)
+    
+    async def chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        task_type: str = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        stream: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Get chat completion from appropriate LLM based on task type.
+        
+        Args:
+            messages: List of message dictionaries
+            task_type: Type of task (determines which LLM to use)
+            model: Model to use (will override task-based selection)
+            temperature: Sampling temperature
+            max_tokens: Maximum number of tokens to generate
+            stream: Whether to stream the response
+            
+        Returns:
+            API response
+        """
+        client = self.main_llm_client
+        if task_type:
+            client = self.get_client_for_task(task_type)
+            logger.debug(f"Using {client.__class__.__name__} for {task_type} task")
+        
+        return await client.chat_completion(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=stream
+        )
+    
+    async def get_trade_decision(
+        self,
+        stock_data: Dict[str, Any],
+        market_context: Dict[str, Any],
+        portfolio_state: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Get trade decision from appropriate LLM.
+        
+        Args:
+            stock_data: Data for the stock
+            market_context: Current market context
+            portfolio_state: Current portfolio state
+            
+        Returns:
+            Trade decision
+        """
+        client = self.get_client_for_task(self.TASK_TRADE_DECISION)
+        return await client.get_trade_decision(stock_data, market_context, portfolio_state)
+    
+    async def get_exit_decision(
+        self,
+        position_data: Dict[str, Any],
+        current_data: Dict[str, Any],
+        market_context: Dict[str, Any],
+        exit_signals: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Get exit decision from appropriate LLM.
+        
+        Args:
+            position_data: Data for the current position
+            current_data: Current stock data
+            market_context: Current market context
+            exit_signals: Exit signals from monitoring
+            
+        Returns:
+            Exit decision
+        """
+        client = self.get_client_for_task(self.TASK_EXIT_DECISION)
+        return await client.get_exit_decision(position_data, current_data, market_context, exit_signals)
+    
+    async def get_market_analysis(
+        self,
+        market_data: Dict[str, Any],
+        market_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Get market analysis from appropriate LLM.
+        
+        Args:
+            market_data: Dictionary containing market data
+            market_context: Dictionary containing market context
+            
+        Returns:
+            Market analysis with regime identification and recommendations
+        """
+        client = self.get_client_for_task(self.TASK_MARKET_ANALYSIS)
+        return await client.get_market_analysis(market_data, market_context)
+
+def get_llm_router() -> LLMRouter:
+    """
+    Create and return an LLM router instance configured from settings.
+    
+    This factory function reads configuration and creates the appropriate
+    router with specialized LLM clients if needed.
+    
+    Returns:
+        LLMRouter: Configured router instance
+    """
+    # Create main LLM client
+    main_llm_client = OpenRouterClient()
+    
+    # Create trade-specific LLM client if configured differently
+    # In the future, may differentiate based on settings
+    # For now, use the same client for both
+    trade_llm_client = main_llm_client
+    
+    # Instantiate and return the router
+    return LLMRouter(
+        main_llm_client=main_llm_client,
+        trade_llm_client=trade_llm_client
+    )
+
+# Create a global instance of the OpenRouterClient for compatibility
 openrouter_client = OpenRouterClient()
+
+# Create a global instance of the LLM router
+llm_router = get_llm_router()

@@ -226,9 +226,14 @@ class PatternRecognitionModel:
         self.model.to(device)
         
         # Load model if path is provided
-        if model_path and os.path.exists(model_path):
-            self.load_model(model_path)
-            logger.info(f"Loaded pattern recognition model from {model_path}")
+        if model_path:
+            # Convert to absolute path if it's a relative path
+            if not os.path.isabs(model_path):
+                model_path = os.path.join(settings.models_dir, os.path.basename(model_path))
+            
+            if os.path.exists(model_path):
+                self.load_model(model_path)
+                logger.info(f"Loaded pattern recognition model from {model_path}")
         else:
             logger.warning("No model file found, using untrained model")
     
@@ -240,10 +245,42 @@ class PatternRecognitionModel:
             model_path: Path to the model file
         """
         try:
-            self.model.load_state_dict(torch.load(model_path, map_location=device))
-            self.model.eval()
+            # Try to load the model state dict
+            state_dict = torch.load(model_path, map_location=device)
+            
+            # Check if the state dict is compatible with the model
+            try:
+                # Check if we need to modify the state dict to match our model
+                if "fc3.weight" in state_dict:
+                    # The model was created with a different architecture
+                    # Create a new state dict with the correct keys
+                    logger.info("Converting model state dict to match current architecture")
+                    
+                    # Create a new state dict with only the keys we need
+                    new_state_dict = {}
+                    
+                    # Copy the convolutional and batch norm layers if they exist
+                    for key in ["conv1.weight", "conv1.bias", "conv2.weight", "conv2.bias", 
+                               "conv3.weight", "conv3.bias", "bn1.weight", "bn1.bias", 
+                               "bn1.running_mean", "bn1.running_var", "bn2.weight", "bn2.bias", 
+                               "bn2.running_mean", "bn2.running_var", "bn3.weight", "bn3.bias", 
+                               "bn3.running_mean", "bn3.running_var"]:
+                        if key in state_dict:
+                            new_state_dict[key] = state_dict[key]
+                    
+                    # Initialize the model with the partial state dict
+                    self.model.load_state_dict(new_state_dict, strict=False)
+                else:
+                    # Try to load the full state dict
+                    self.model.load_state_dict(state_dict)
+                
+                self.model.eval()
+                logger.info("Model loaded successfully")
+            except Exception as e:
+                logger.error(f"Error loading model: {e}")
+                logger.warning("Using untrained model due to architecture mismatch")
         except Exception as e:
-            logger.error(f"Error loading model: {e}")
+            logger.error(f"Error loading model file: {e}")
     
     def save_model(self, model_path: str):
         """

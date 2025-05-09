@@ -12,6 +12,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple, Union, Any
+from enum import Enum, auto
 
 import pandas as pd
 import numpy as np
@@ -27,6 +28,38 @@ from src.llm.prompts import PromptTemplates
 from src.llm.parsing import parse_trade_decision
 from src.utils.logging import setup_logger
 from src.utils.redis_client import redis_client
+
+# Define enum classes needed for trading system
+class OrderStatus(Enum):
+    """Order status enum"""
+    PENDING = auto()
+    FILLED = auto()
+    CANCELLED = auto()
+    REJECTED = auto()
+    EXPIRED = auto()
+    PARTIAL = auto()
+    
+class OrderType(Enum):
+    """Order type enum"""
+    MARKET = auto()
+    LIMIT = auto()
+    STOP = auto()
+    STOP_LIMIT = auto()
+    TRAILING_STOP = auto()
+    
+class TradeResult(Enum):
+    """Trade execution result enum"""
+    SUCCESS = auto()
+    FAILURE = auto()
+    PARTIAL = auto()
+    REJECTED = auto()
+    
+class TradeDirection(Enum):
+    """Trade direction enum"""
+    LONG = auto()
+    SHORT = auto()
+    EXIT_LONG = auto()
+    EXIT_SHORT = auto()
 
 # Load environment variables
 load_dotenv()

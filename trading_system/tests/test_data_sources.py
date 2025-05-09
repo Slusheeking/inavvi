@@ -3,6 +3,7 @@ Tests for data source modules.
 """
 import asyncio
 import unittest
+import aiohttp
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
@@ -43,6 +44,17 @@ class TestPolygonAPI(unittest.TestCase):
             'volume': [1000000, 1100000, 1200000, 1300000, 1400000],
             'vwap': [149.2, 150.2, 151.2, 152.2, 153.2],
             'transactions': [5000, 5500, 6000, 6500, 7000]
+        }, index=pd.date_range(start=pd.Timestamp.now() - pd.Timedelta(days=4), periods=5, freq='D'))
+        
+        # Sample data with missing values for testing data validation
+        self.sample_df_with_missing = pd.DataFrame({
+            'open': [149.0, np.nan, 151.0, 152.0, 153.0],
+            'high': [150.0, 151.0, np.nan, 153.0, 154.0],
+            'low': [148.0, 149.0, 150.0, np.nan, 152.0],
+            'close': [149.5, 150.5, 151.5, 152.5, np.nan],
+            'volume': [1000000, np.nan, 1200000, 1300000, 1400000],
+            'vwap': [149.2, 150.2, 151.2, np.nan, 153.2],
+            'transactions': [5000, 5500, np.nan, 6500, 7000]
         }, index=pd.date_range(start=pd.Timestamp.now() - pd.Timedelta(days=4), periods=5, freq='D'))
     
     @patch('src.data_sources.polygon.PolygonAPI.get_stock_snapshot')
@@ -133,6 +145,51 @@ class TestPolygonAPI(unittest.TestCase):
         self.assertTrue(result)
         mock_connect.assert_called_once()
         mock_subscribe.assert_called_once_with(symbols)
+        
+    @patch('src.data_sources.polygon.PolygonAPI.get_stock_snapshot')
+    def test_get_stock_snapshot_error_handling(self, mock_get_snapshot):
+        """Test error handling when fetching stock snapshot."""
+        # Set up mock to raise an exception
+        mock_get_snapshot.side_effect = aiohttp.ClientError("Network error")
+        
+        # Run test asynchronously and expect exception to be raised
+        with self.assertRaises(aiohttp.ClientError):
+            asyncio.run(self.polygon.get_stock_snapshot('AAPL'))
+        
+        mock_get_snapshot.assert_called_once_with('AAPL')
+    
+    @patch('src.data_sources.polygon.PolygonAPI.get_daily_bars')
+    def test_get_daily_bars_with_missing_data(self, mock_get_daily_bars):
+        """Test handling of missing data in daily bars."""
+        # Set up mock to return data with missing values
+        mock_get_daily_bars.return_value = self.sample_df_with_missing
+        
+        # Run test asynchronously
+        result = asyncio.run(self.polygon.get_daily_bars('AAPL', days=5))
+        
+        # Assert
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(len(result), 5)
+        # Check that NaN values have been handled
+        self.assertFalse(result['close'].isnull().any())
+        self.assertFalse(result['open'].isnull().any())
+        mock_get_daily_bars.assert_called_once_with('AAPL', days=5)
+    
+    @patch('src.data_sources.polygon.PolygonAPI.get_options_chain')
+    def test_get_options_chain_error_handling(self, mock_get_options):
+        """Test error handling when fetching options chain."""
+        # Set up mock to raise a PolygonDataError
+        mock_get_options.side_effect = Exception("API error")
+        
+        # Run test asynchronously
+        result = asyncio.run(self.polygon.get_options_chain('AAPL'))
+        
+        # Assert that we get an empty result instead of an exception
+        self.assertEqual(result['symbol'], 'AAPL')
+        self.assertEqual(result['expirations'], [])
+        self.assertEqual(result['calls'], [])
+        self.assertEqual(result['puts'], [])
+        mock_get_options.assert_called_once_with('AAPL')
 
 class TestAlphaVantageClient(unittest.TestCase):
     """Test the Alpha Vantage API client."""
@@ -180,6 +237,41 @@ class TestAlphaVantageClient(unittest.TestCase):
                 'Financials': '0.15'
             }
         }
+        
+        # Sample financial data
+        self.sample_income_statement = {
+            "symbol": "AAPL",
+            "annualReports": [
+                {
+                    "fiscalDateEnding": "2022-09-30",
+                    "totalRevenue": "394328000000",
+                    "netIncome": "99803000000"
+                },
+                {
+                    "fiscalDateEnding": "2021-09-30",
+                    "totalRevenue": "365817000000",
+                    "netIncome": "94680000000"
+                }
+            ]
+        }
+        
+        # Sample data with missing fields
+        self.sample_income_statement_missing = {
+            "symbol": "AAPL",
+            "annualReports": [
+                {
+                    "fiscalDateEnding": "2022-09-30",
+                    "totalRevenue": "",
+                    "netIncome": None
+                }
+            ]
+        }
+        
+        # Sample data with empty reports
+        self.sample_empty_reports = {
+            "symbol": "AAPL",
+            "annualReports": []
+        }
     
     @patch('src.data_sources.alpha_vantage.alpha_vantage_client.get_symbol_news')
     def test_get_symbol_news(self, mock_get_news):
@@ -211,6 +303,82 @@ class TestAlphaVantageClient(unittest.TestCase):
         self.assertEqual(result['Rank A: Real-Time Performance']['Information Technology'], '1.25')
         self.assertEqual(result['Rank B: 1 Day Performance']['Health Care'], '0.70')
         mock_get_sector_perf.assert_called_once()
+        
+    @patch('src.data_sources.alpha_vantage.alpha_vantage_client.get_income_statement')
+    def test_get_income_statement(self, mock_get_income):
+        """Test fetching income statement."""
+        # Set up mock
+        mock_get_income.return_value = self.sample_income_statement
+        
+        # Run test asynchronously
+        result = asyncio.run(self.alpha_vantage.get_income_statement('AAPL'))
+        
+        # Assert
+        self.assertEqual(result['symbol'], 'AAPL')
+        self.assertEqual(len(result['annualReports']), 2)
+        self.assertEqual(result['annualReports'][0]['fiscalDateEnding'], '2022-09-30')
+        self.assertEqual(result['annualReports'][0]['totalRevenue'], '394328000000')
+        mock_get_income.assert_called_once_with('AAPL')
+    
+    @patch('src.data_sources.alpha_vantage.alpha_vantage_client.get_income_statement')
+    def test_get_income_statement_missing_fields(self, mock_get_income):
+        """Test handling of missing fields in income statement."""
+        # Set up mock
+        mock_get_income.return_value = self.sample_income_statement_missing
+        
+        # Run test asynchronously
+        result = asyncio.run(self.alpha_vantage.get_income_statement('AAPL'))
+        
+        # Assert
+        self.assertEqual(result['symbol'], 'AAPL')
+        self.assertEqual(len(result['annualReports']), 1)
+        self.assertEqual(result['annualReports'][0]['fiscalDateEnding'], '2022-09-30')
+        # Check that empty fields are still present
+        self.assertIn('totalRevenue', result['annualReports'][0])
+        self.assertIn('netIncome', result['annualReports'][0])
+        mock_get_income.assert_called_once_with('AAPL')
+    
+    @patch('src.data_sources.alpha_vantage.alpha_vantage_client.get_income_statement')
+    def test_get_income_statement_empty_reports(self, mock_get_income):
+        """Test handling of empty reports in income statement."""
+        # Set up mock
+        mock_get_income.return_value = self.sample_empty_reports
+        
+        # Run test asynchronously
+        result = asyncio.run(self.alpha_vantage.get_income_statement('AAPL'))
+        
+        # Assert
+        self.assertEqual(result['symbol'], 'AAPL')
+        self.assertEqual(len(result['annualReports']), 0)
+        mock_get_income.assert_called_once_with('AAPL')
+    
+    @patch('src.data_sources.alpha_vantage.alpha_vantage_client._make_request')
+    def test_rate_limit_error_handling(self, mock_make_request):
+        """Test handling of rate limit errors."""
+        # Set up mock to raise a rate limit error
+        from src.data_sources.alpha_vantage import AlphaVantageRateLimitError
+        mock_make_request.side_effect = AlphaVantageRateLimitError("Rate limit exceeded")
+        
+        # Run test asynchronously with retry decorator
+        with self.assertRaises(AlphaVantageRateLimitError):
+            asyncio.run(self.alpha_vantage.get_income_statement('AAPL'))
+        
+        # Assert that _make_request was called
+        self.assertTrue(mock_make_request.called)
+    
+    @patch('src.data_sources.alpha_vantage.alpha_vantage_client._make_request')
+    def test_symbol_not_found_error_handling(self, mock_make_request):
+        """Test handling of symbol not found errors."""
+        # Set up mock to raise a symbol not found error
+        from src.data_sources.alpha_vantage import AlphaVantageSymbolNotFoundError
+        mock_make_request.side_effect = AlphaVantageSymbolNotFoundError("Symbol not found")
+        
+        # Run test asynchronously
+        result = asyncio.run(self.alpha_vantage.get_income_statement('INVALID'))
+        
+        # Assert that we get None instead of an exception
+        self.assertIsNone(result)
+        self.assertTrue(mock_make_request.called)
 
 class TestYahooFinanceClient(unittest.TestCase):
     """Test the Yahoo Finance API client."""
@@ -240,6 +408,28 @@ class TestYahooFinanceClient(unittest.TestCase):
             'forwardPE': 22.0,
             'dividendYield': 0.006
         }
+        
+        # Sample historical data
+        self.sample_history = pd.DataFrame({
+            'Open': [149.0, 150.0, 151.0, 152.0, 153.0],
+            'High': [150.0, 151.0, 152.0, 153.0, 154.0],
+            'Low': [148.0, 149.0, 150.0, 151.0, 152.0],
+            'Close': [149.5, 150.5, 151.5, 152.5, 153.5],
+            'Volume': [1000000, 1100000, 1200000, 1300000, 1400000],
+            'Dividends': [0, 0, 0, 0, 0],
+            'Stock Splits': [0, 0, 0, 0, 0]
+        }, index=pd.date_range(start=pd.Timestamp.now() - pd.Timedelta(days=4), periods=5, freq='D'))
+        
+        # Sample data with missing values
+        self.sample_history_with_missing = pd.DataFrame({
+            'Open': [149.0, np.nan, 151.0, 152.0, 153.0],
+            'High': [150.0, 151.0, np.nan, 153.0, 154.0],
+            'Low': [148.0, 149.0, 150.0, np.nan, 152.0],
+            'Close': [149.5, 150.5, 151.5, 152.5, np.nan],
+            'Volume': [1000000, np.nan, 1200000, 1300000, 1400000],
+            'Dividends': [0, 0, 0, 0, 0],
+            'Stock Splits': [0, 0, 0, 0, 0]
+        }, index=pd.date_range(start=pd.Timestamp.now() - pd.Timedelta(days=4), periods=5, freq='D'))
     
     @patch('src.data_sources.yahoo_finance.yahoo_finance_client.get_ticker_info')
     def test_get_ticker_info(self, mock_get_ticker_info):
@@ -256,6 +446,79 @@ class TestYahooFinanceClient(unittest.TestCase):
         self.assertEqual(result['sector'], 'Technology')
         self.assertEqual(result['regularMarketPrice'], 150.0)
         mock_get_ticker_info.assert_called_once_with('AAPL')
+    
+    @patch('src.data_sources.yahoo_finance.yahoo_finance_client.get_ticker_info')
+    def test_get_ticker_info_symbol_not_found(self, mock_get_ticker_info):
+        """Test handling of symbol not found errors."""
+        # Set up mock to raise a symbol not found error
+        from src.data_sources.yahoo_finance import YahooFinanceSymbolNotFoundError
+        mock_get_ticker_info.side_effect = YahooFinanceSymbolNotFoundError("Symbol not found")
+        
+        # Run test asynchronously
+        result = asyncio.run(self.yahoo.get_ticker_info('INVALID'))
+        
+        # Assert that we get None instead of an exception
+        self.assertIsNone(result)
+        mock_get_ticker_info.assert_called_once_with('INVALID')
+    
+    @patch('src.data_sources.yahoo_finance.yahoo_finance_client.get_historical_data')
+    def test_get_historical_data(self, mock_get_history):
+        """Test fetching historical data."""
+        # Set up mock
+        mock_get_history.return_value = self.sample_history
+        
+        # Run test asynchronously
+        result = asyncio.run(self.yahoo.get_historical_data('AAPL', period='5d'))
+        
+        # Assert
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result['Close'].iloc[-1], 153.5)
+        mock_get_history.assert_called_once_with('AAPL', period='5d')
+    
+    @patch('src.data_sources.yahoo_finance.yahoo_finance_client.get_historical_data')
+    def test_get_historical_data_with_missing_values(self, mock_get_history):
+        """Test handling of missing values in historical data."""
+        # Set up mock
+        mock_get_history.return_value = self.sample_history_with_missing
+        
+        # Run test asynchronously
+        result = asyncio.run(self.yahoo.get_historical_data('AAPL', period='5d'))
+        
+        # Assert
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(len(result), 5)
+        # Check that NaN values have been handled
+        self.assertFalse(result['Close'].isnull().any())
+        self.assertFalse(result['Open'].isnull().any())
+        mock_get_history.assert_called_once_with('AAPL', period='5d')
+    
+    @patch('src.data_sources.yahoo_finance.yahoo_finance_client._fetch_data')
+    def test_rate_limit_error_handling(self, mock_fetch_data):
+        """Test handling of rate limit errors."""
+        # Set up mock to raise a rate limit error
+        from src.data_sources.yahoo_finance import YahooFinanceRateLimitError
+        mock_fetch_data.side_effect = YahooFinanceRateLimitError("Rate limit exceeded")
+        
+        # Run test asynchronously with retry decorator
+        with self.assertRaises(YahooFinanceRateLimitError):
+            asyncio.run(self.yahoo.get_ticker_info('AAPL'))
+        
+        # Assert that _fetch_data was called
+        self.assertTrue(mock_fetch_data.called)
+    
+    @patch('src.data_sources.yahoo_finance.yahoo_finance_client.get_historical_data')
+    def test_invalid_interval_error_handling(self, mock_get_history):
+        """Test handling of invalid interval errors."""
+        # Set up mock to raise an invalid interval error
+        from src.data_sources.yahoo_finance import YahooFinanceInvalidIntervalError
+        mock_get_history.side_effect = YahooFinanceInvalidIntervalError("Invalid interval")
+        
+        # Run test asynchronously
+        with self.assertRaises(YahooFinanceInvalidIntervalError):
+            asyncio.run(self.yahoo.get_historical_data('AAPL', interval='invalid'))
+        
+        mock_get_history.assert_called_once_with('AAPL', interval='invalid')
 
 class TestDataPipeline(unittest.TestCase):
     """Test the data pipeline."""
@@ -286,6 +549,28 @@ class TestDataPipeline(unittest.TestCase):
             'close': [149.5, 150.5, 151.5, 152.5, 153.5],
             'volume': [1000000, 1100000, 1200000, 1300000, 1400000],
         }, index=pd.date_range(start=pd.Timestamp.now() - pd.Timedelta(days=4), periods=5, freq='D'))
+        
+        # Sample data with missing values
+        self.sample_df_with_missing = pd.DataFrame({
+            'open': [149.0, np.nan, 151.0, 152.0, 153.0],
+            'high': [150.0, 151.0, np.nan, 153.0, 154.0],
+            'low': [148.0, 149.0, 150.0, np.nan, 152.0],
+            'close': [149.5, 150.5, 151.5, 152.5, np.nan],
+            'volume': [1000000, np.nan, 1200000, 1300000, 1400000],
+        }, index=pd.date_range(start=pd.Timestamp.now() - pd.Timedelta(days=4), periods=5, freq='D'))
+        
+        # Sample technical indicators
+        self.sample_indicators = {
+            'rsi_14': 65.0,
+            'macd': 0.5,
+            'macd_signal': 0.3,
+            'macd_histogram': 0.2,
+            'bb_upper_20': 155.0,
+            'bb_middle_20': 150.0,
+            'bb_lower_20': 145.0,
+            'bb_width_20': 0.067,
+            'bb_position_20': 0.5
+        }
     
     @patch('src.core.data_pipeline.data_pipeline.get_stock_data')
     def test_get_stock_data(self, mock_get_stock_data):
@@ -348,6 +633,81 @@ class TestDataPipeline(unittest.TestCase):
         self.assertEqual(result['sector_performance'], 1.25)
         self.assertEqual(result['vix'], 15.5)
         mock_get_context.assert_called_once()
+    
+    @patch('src.core.data_pipeline.data_pipeline.get_historical_data')
+    def test_get_historical_data_with_missing_values(self, mock_get_history):
+        """Test handling of missing values in historical data."""
+        # Set up mock
+        mock_get_history.return_value = self.sample_df_with_missing
+        
+        # Run test asynchronously
+        result = asyncio.run(self.pipeline.get_historical_data('AAPL', days=5))
+        
+        # Assert
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(len(result), 5)
+        # Check that NaN values have been handled
+        self.assertFalse(result['close'].isnull().any())
+        self.assertFalse(result['open'].isnull().any())
+        mock_get_history.assert_called_once_with('AAPL', days=5)
+    
+    @patch('src.core.data_pipeline.data_pipeline.get_stock_data')
+    def test_get_stock_data_error_handling(self, mock_get_stock_data):
+        """Test error handling when fetching stock data."""
+        # Set up mock to raise an exception
+        mock_get_stock_data.side_effect = Exception("API error")
+        
+        # Run test asynchronously
+        result = asyncio.run(self.pipeline.get_stock_data('AAPL', 'snapshot', fallback=True))
+        
+        # Assert that we get a fallback result instead of an exception
+        self.assertEqual(result['symbol'], 'AAPL')
+        self.assertEqual(result['status'], 'error')
+        self.assertIn('error_message', result)
+        mock_get_stock_data.assert_called_once_with('AAPL', 'snapshot')
+    
+    @patch('src.core.data_pipeline.data_pipeline.get_technical_indicators')
+    def test_get_technical_indicators_with_fallback(self, mock_get_indicators):
+        """Test fallback for technical indicators."""
+        # Set up mock to raise an exception
+        mock_get_indicators.side_effect = Exception("Calculation error")
+        
+        # Run test asynchronously
+        result = asyncio.run(self.pipeline.get_technical_indicators('AAPL', fallback=True))
+        
+        # Assert that we get a fallback result instead of an exception
+        self.assertEqual(result['symbol'], 'AAPL')
+        self.assertEqual(result['status'], 'error')
+        self.assertIn('error_message', result)
+        mock_get_indicators.assert_called_once_with('AAPL')
+    
+    @patch('src.core.data_pipeline.data_pipeline.validate_data')
+    def test_validate_data(self, mock_validate):
+        """Test data validation."""
+        # Set up mock
+        mock_validate.return_value = (True, "Data is valid")
+        
+        # Run test asynchronously
+        result, message = asyncio.run(self.pipeline.validate_data(self.sample_df))
+        
+        # Assert
+        self.assertTrue(result)
+        self.assertEqual(message, "Data is valid")
+        mock_validate.assert_called_once_with(self.sample_df)
+    
+    @patch('src.core.data_pipeline.data_pipeline.validate_data')
+    def test_validate_data_with_issues(self, mock_validate):
+        """Test data validation with issues."""
+        # Set up mock
+        mock_validate.return_value = (False, "Missing required columns")
+        
+        # Run test asynchronously
+        result, message = asyncio.run(self.pipeline.validate_data(self.sample_df_with_missing))
+        
+        # Assert
+        self.assertFalse(result)
+        self.assertEqual(message, "Missing required columns")
+        mock_validate.assert_called_once_with(self.sample_df_with_missing)
 
 if __name__ == '__main__':
     unittest.main()
