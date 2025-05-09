@@ -1,0 +1,36 @@
+# Byte-code files
+*.pyc
+__pycache__/
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Data directories
+data/
+
+# Log files
+logs/
+*.log
+
+# Model files
+models/
+
+# Test coverage
+.coverage
+htmlcov/
+
+# Distribution and packaging
+dist/
+build/
+*.egg-info/
+
+# OS generated files
+.DS_Store
+Thumbs.db
