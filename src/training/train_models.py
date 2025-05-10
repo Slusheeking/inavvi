@@ -2,7 +2,7 @@
 Automated training system for all ML models in the trading system.
 
 This script handles:
-- Data downloading and preprocessing
+- Data downloading and preprocessing from real APIs
 - Hyperparameter optimization with Optuna
 - Training and validation of all models
 - Experiment tracking with MLflow
@@ -70,12 +70,13 @@ if project_root not in sys.path:
 from src.config.settings import settings
 from src.utils.logging import setup_logger
 from src.utils.redis_client import redis_client
+from src.training.data_fetcher import DataFetcher
 
 # Import model modules
-from src.models.pattern_recognition import PatternRecognitionModel, pattern_recognition_model
-from src.models.ranking_model import RankingModel, rank_opportunities, get_model_weights
-from src.models.sentiment import FinancialSentimentModel, analyze_sentiment, analyze_news_batch
-from src.models.exit_optimization import ExitOptimizationModel, evaluate_exit_strategy, train_exit_model
+from src.models.pattern_recognition import PatternRecognitionModel
+from src.models.ranking_model import RankingModel
+from src.models.sentiment import FinancialSentimentModel
+from src.models.exit_optimization import ExitOptimizationModel
 
 # Try to import GPU acceleration libraries
 try:
@@ -162,6 +163,14 @@ class ModelTrainer:
         self.optimization_trials = optimization_trials
         self.use_mlflow = use_mlflow
         
+        # Initialize data fetcher
+        self.data_fetcher = DataFetcher(
+            data_days=data_days,
+            use_polygon=True,
+            use_alpha_vantage=True,
+            use_redis_cache=True
+        )
+        
         # Data storage
         self.data = {}
         self.features = {}
@@ -247,43 +256,24 @@ class ModelTrainer:
     
     def download_data(self):
         """
-        Download and prepare data for all models.
+        Download and prepare data for all models using DataFetcher.
         """
         logger.info(f"Downloading data for {self.data_days} days")
         
-        # Get universe of symbols from Redis
-        symbols = redis_client.get_watchlist() or []
-        
-        # Add major indices and ETFs
-        indices = ["SPY", "QQQ", "IWM", "VIX", "XLF", "XLE", "XLI", "XLK", "XLV", "XLP", "XLY", "XLB", "XLU"]
-        for index in indices:
-            if index not in symbols:
-                symbols.append(index)
-        
-        if not symbols:
-            # Fallback symbols if no watchlist is available
-            symbols = ["AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "TSLA", "JPM", "V", "PG", "JNJ", "SPY", "QQQ"]
-        
-        logger.info(f"Downloading data for {len(symbols)} symbols")
-        
         try:
-            # Download data for each symbol (actually retrieve from Redis in this implementation)
-            historical_data = {}
+            # Get universe of symbols
+            universe = self.data_fetcher.get_universe()
             
-            for symbol in symbols:
-                # Check if data exists in Redis
-                redis_key = f"stocks:history:{symbol}:{self.data_days}d:1d"
-                df = redis_client.get(redis_key)
-                
-                if df is not None and not df.empty:
-                    historical_data[symbol] = df
+            # Fetch historical price data
+            historical_data = self.data_fetcher.fetch_historical_data(
+                symbols=universe,
+                timeframe="1d"
+            )
             
+            # Check if we got any data
             if not historical_data:
-                logger.warning("No historical data found in Redis")
-                
-                # In a real implementation, we would download data here
-                # For now, we'll use synthetic data for demonstration
-                historical_data = self._generate_synthetic_data(symbols)
+                logger.warning("No historical data fetched")
+                return False
             
             # Convert to GPU DataFrames if using GPU
             if self.use_gpu:
@@ -317,161 +307,19 @@ class ModelTrainer:
         logger.info("Downloading news data for sentiment analysis")
         
         try:
-            # Check if news data exists in Redis
-            news_data = redis_client.get("news:recent")
+            # Fetch news data from data fetcher
+            self.news_data = self.data_fetcher.fetch_news_data(days=30)
             
-            if news_data and isinstance(news_data, list) and len(news_data) > 0:
-                logger.info(f"Found {len(news_data)} news items in Redis")
-                self.news_data = news_data
-            else:
-                logger.warning("No news data found in Redis")
-                
-                # Generate synthetic news data for demonstration
-                self.news_data = self._generate_synthetic_news_data()
+            if not self.news_data:
+                logger.warning("No news data fetched")
+                return False
             
+            logger.info(f"Downloaded {len(self.news_data)} news items")
             return True
         except Exception as e:
             logger.error(f"Error downloading news data: {e}")
             self.news_data = []
             return False
-    
-    def _generate_synthetic_data(self, symbols):
-        """Generate synthetic data for demonstration."""
-        logger.info("Generating synthetic price data for training")
-        
-        synthetic_data = {}
-        
-        for symbol in symbols:
-            # Create a date range
-            days = self.data_days
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days)
-            date_range = pd.date_range(start=start_date, end=end_date, freq='B')
-            
-            # Generate synthetic OHLCV data
-            n = len(date_range)
-            base_price = np.random.uniform(50, 500)
-            
-            # Generate price series with realistic properties
-            returns = np.random.normal(0.0005, 0.015, n)  # Daily returns
-            returns[0] = 0
-            log_prices = np.cumsum(returns) + np.log(base_price)
-            prices = np.exp(log_prices)
-            
-            # Generate OHLCV data
-            df = pd.DataFrame({
-                'open': prices * (1 + np.random.normal(0, 0.005, n)),
-                'high': prices * (1 + np.abs(np.random.normal(0, 0.01, n))),
-                'low': prices * (1 - np.abs(np.random.normal(0, 0.01, n))),
-                'close': prices,
-                'volume': np.random.lognormal(mean=np.log(1000000), sigma=0.5, size=n)
-            }, index=date_range)
-            
-            # Fix any inconsistencies (high > open, high > close, etc.)
-            for i in range(n):
-                high = max(df.iloc[i]['open'], df.iloc[i]['close'], df.iloc[i]['high'])
-                low = min(df.iloc[i]['open'], df.iloc[i]['close'], df.iloc[i]['low'])
-                df.iloc[i, df.columns.get_loc('high')] = high
-                df.iloc[i, df.columns.get_loc('low')] = low
-            
-            synthetic_data[symbol] = df
-        
-        logger.info(f"Generated synthetic data for {len(synthetic_data)} symbols")
-        return synthetic_data
-    
-    def _generate_synthetic_news_data(self, count=200):
-        """Generate synthetic news data for sentiment analysis training."""
-        logger.info(f"Generating {count} synthetic news items for sentiment training")
-        
-        # Define templates for positive, negative, and neutral news
-        positive_templates = [
-            "{company} reports record profits in quarterly earnings",
-            "{company} announces new product launch that exceeds expectations",
-            "{company} stock surges after beating analyst estimates",
-            "{company} expands into new markets with promising growth potential",
-            "{company} announced increased dividend payout to shareholders",
-            "Analysts upgrade {company} citing strong growth prospects",
-            "{company} signs major new partnership with {company2}",
-            "{company} completes successful acquisition of {company2}"
-        ]
-        
-        negative_templates = [
-            "{company} misses earnings expectations, shares plummet",
-            "{company} announces layoffs amid restructuring efforts",
-            "{company} faces regulatory investigation over business practices",
-            "{company} issues profit warning for upcoming quarter",
-            "Analysts downgrade {company} citing competitive pressures",
-            "{company} reports significant drop in market share",
-            "{company} delayed product launch raises investor concerns",
-            "{company} faces lawsuit from {company2} over patent infringement"
-        ]
-        
-        neutral_templates = [
-            "{company} reports earnings in line with analyst expectations",
-            "{company} maintains current outlook for fiscal year",
-            "{company} appoints new board member",
-            "{company} to present at upcoming industry conference",
-            "{company} announces regular quarterly dividend",
-            "Analysts maintain neutral rating on {company} stock",
-            "{company} relocates headquarters to new office space",
-            "{company} holds annual shareholder meeting"
-        ]
-        
-        # List of company names (use symbols from data)
-        companies = list(self.data.keys()) if hasattr(self, 'data') and self.data else [
-            "Apple", "Microsoft", "Amazon", "Google", "Meta", "Nvidia", "Tesla", 
-            "JPMorgan", "Visa", "Procter & Gamble", "Johnson & Johnson", "Walmart", "Exxon"
-        ]
-        
-        # Generate news items
-        news_items = []
-        now = datetime.now()
-        
-        for i in range(count):
-            # Select a company
-            company = np.random.choice(companies)
-            company2 = np.random.choice([c for c in companies if c != company])
-            
-            # Determine sentiment (slight bias toward neutral)
-            sentiment_type = np.random.choice(["positive", "negative", "neutral"], p=[0.3, 0.3, 0.4])
-            
-            # Select a template
-            if sentiment_type == "positive":
-                template = np.random.choice(positive_templates)
-                score = np.random.uniform(0.6, 1.0)
-            elif sentiment_type == "negative":
-                template = np.random.choice(negative_templates)
-                score = np.random.uniform(-1.0, -0.6)
-            else:
-                template = np.random.choice(neutral_templates)
-                score = np.random.uniform(-0.3, 0.3)
-            
-            # Fill in the template
-            title = template.format(company=company, company2=company2)
-            
-            # Generate a longer summary
-            summary = f"In a {sentiment_type} development for investors, {title.lower()}. "
-            summary += f"This news could impact the company's financial performance in the coming quarter."
-            
-            # Generate a timestamp (within the past 30 days)
-            days_ago = np.random.randint(0, 30)
-            timestamp = (now - timedelta(days=days_ago)).isoformat()
-            
-            # Create the news item
-            news_item = {
-                "title": title,
-                "summary": summary,
-                "source": np.random.choice(["Bloomberg", "Reuters", "CNBC", "WSJ", "Financial Times"]),
-                "url": f"https://example.com/news/{i}",
-                "published_at": timestamp,
-                "sentiment_score": score,
-                "symbols": [company],
-                "relevance_score": np.random.uniform(0.7, 1.0)
-            }
-            
-            news_items.append(news_item)
-        
-        return news_items
     
     def prepare_features(self):
         """
@@ -1764,13 +1612,17 @@ class ModelTrainer:
                         mlflow.log_metric(f"feature_importance_{feature}", importance)
                 
                 # Save model
-                model.save_model()
+                model_path = os.path.join(settings.models_dir, "ranking", f"ranking_model_{self.timestamp}.pkl")
+                model.save_model(model_path)
                 
-                logger.info(f"Ranking model saved successfully")
+                # Also save to default path
+                model.save_model(settings.model.ranking_model_path)
+                
+                logger.info(f"Ranking model saved to {model_path}")
                 
                 # Store model version info
                 self.model_versions["ranking"] = {
-                    "path": settings.model.ranking_model_path,
+                    "path": model_path,
                     "timestamp": self.timestamp,
                     "metrics": self.model_metrics.get("ranking", {})
                 }

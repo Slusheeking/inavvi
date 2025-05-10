@@ -18,10 +18,15 @@ from .train_models import (
     schedule_training
 )
 
+from .data_fetcher import (
+    DataFetcher
+)
+
 # Define public API
 __all__ = [
     # Main classes
     "ModelTrainer",
+    "DataFetcher",
     
     # Main functions
     "main",
