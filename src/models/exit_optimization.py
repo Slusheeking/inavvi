@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from collections import deque
 from torch.distributions import Normal
 from torch.optim import Adam
+from sklearn.preprocessing import StandardScaler # Import StandardScaler
 
 from src.config.settings import settings
 from src.models.pattern_recognition import pattern_recognition_model
@@ -31,6 +32,25 @@ logger = setup_logger("exit_optimization")
 # Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() and settings.advanced.use_gpu else "cpu")
 logger.info(f"Using device: {device}")
+
+# Legacy model for compatibility with older saved models
+class LegacyModel(nn.Module):
+    """
+    Legacy model architecture to support loading older model formats.
+    This recreates the structure that was used when the model was saved.
+    """
+    def __init__(self, state_dim=10, action_dim=4, hidden_dim=128):
+        super(LegacyModel, self).__init__()
+        # Recreating the architecture of the saved model with fc1, fc2, fc3 layers
+        # Using fixed dimensions based on the checkpoint: [128, 10], [128, 128], [4, 128]
+        self.fc1 = nn.Linear(state_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, action_dim)
+        
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
 
 # Define actions
 ACTIONS = {
@@ -149,7 +169,7 @@ class SACAgent:
         gamma: float = 0.99,
         tau: float = 0.005,
         alpha: float = 0.2,
-        lr: float = 3e-4,
+        lr: float = 1e-4, # Reduced learning rate
         batch_size: int = 256,
         automatic_entropy_tuning: bool = True,
     ):
@@ -187,12 +207,18 @@ class SACAgent:
             "rewards": [],
         }
 
-    def select_action(self, state: np.ndarray, evaluate: bool = False) -> Union[int, np.ndarray]:
+    def select_action(self, state: np.ndarray, evaluate: bool = False, scaler: Optional[StandardScaler] = None) -> Union[int, np.ndarray]:
+        # Apply scaler if provided
+        if scaler:
+            state = scaler.transform(state.reshape(1, -1)).flatten()
+
         state = torch.FloatTensor(state).to(device).unsqueeze(0)
         with torch.no_grad():
             action, _ = self.actor_critic.get_action(state, evaluation=evaluate)
         if evaluate:
-            discrete_action = torch.round(action.item() * 4).int().item()
+            # Ensure action is within the expected range [0, 1] before mapping to discrete actions
+            action_value = torch.clamp(action.item(), 0.0, 1.0)
+            discrete_action = torch.round(action_value * 4).int().item()
             discrete_action = min(max(discrete_action, 0), 4)
             return discrete_action
         return action.cpu().data.numpy().flatten()
@@ -247,7 +273,7 @@ class SACAgent:
 
     def save(self, path: str) -> bool:
         """
-        Save model to disk.
+        Save model to disk with explicit versioning.
         
         Args:
             path: Path to save the model
@@ -258,31 +284,33 @@ class SACAgent:
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             
-            # FIX: Make sure we're using consistent naming for state dicts
-            # This will ensure future loads don't encounter the missing key
+            # Save with version information to help with future loading
+            state_dim = self.actor_critic.critic1[0].in_features - self.actor_critic.mean.out_features
+            action_dim = self.actor_critic.mean.out_features
+            
             checkpoint = {
-                "actor_critic_state_dict": self.actor_critic.state_dict(),
-                "target_value_state_dict": self.target_value.state_dict(),
-                "actor_optimizer_state_dict": self.actor_optimizer.state_dict(),
-                "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
-                "value_optimizer_state_dict": self.value_optimizer.state_dict(),
-                "alpha": self.alpha,
-                "log_alpha": self.log_alpha if self.automatic_entropy_tuning else None,
-                "alpha_optimizer_state_dict": self.alpha_optimizer.state_dict() if self.automatic_entropy_tuning else None,
-                "training_info": self.training_info,
-                "model_metadata": {
-                    "version": "1.0.0",
-                    "datetime": datetime.now().isoformat(),
-                    "state_dim": self.actor_critic.critic1[0].in_features - self.actor_critic.mean.out_features,
-                    "action_dim": self.actor_critic.mean.out_features
-                }
+                'model_version': 'v2',  # Increment this when architecture changes
+                'architecture': 'ActorCritic',  # Name of the architecture
+                'state_dim': state_dim,
+                'action_dim': action_dim,
+                'hidden_dim': 256,  # Default hidden dimension
+                'actor_critic_state_dict': self.actor_critic.state_dict(),
+                'target_value_state_dict': self.target_value.state_dict(),
+                'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
+                'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
+                'value_optimizer_state_dict': self.value_optimizer.state_dict(),
+                'alpha': self.alpha,
+                'log_alpha': self.log_alpha if self.automatic_entropy_tuning else None,
+                'alpha_optimizer_state_dict': self.alpha_optimizer.state_dict() if self.automatic_entropy_tuning else None,
+                'training_info': self.training_info,
+                'datetime': datetime.now().isoformat(),
             }
             
             # Remove None values
             checkpoint = {k: v for k, v in checkpoint.items() if v is not None}
             
             torch.save(checkpoint, path)
-            logger.info(f"Model saved to {path}")
+            logger.info(f"Model saved to {path} with version information")
             return True
             
         except Exception as e:
@@ -291,7 +319,7 @@ class SACAgent:
 
     def load(self, path: str) -> bool:
         """
-        Load model from disk.
+        Load model from disk with support for different architectures.
         
         Args:
             path: Path to the saved model
@@ -305,10 +333,91 @@ class SACAgent:
                 logger.info("Initializing with default values")
                 return False
             
+            # Load the checkpoint to examine its structure
             checkpoint = torch.load(path, map_location=device)
             
-            # FIX: The issue is that the key 'actor_critic_state_dict' doesn't exist
-            # in the saved checkpoint. We need to check what keys are available.
+            # Check if it's the legacy format with fc1, fc2, fc3
+            has_legacy_format = any('fc1' in key for key in checkpoint.keys())
+            
+            if has_legacy_format:
+                logger.info("Detected legacy model format. Using compatibility loader.")
+                
+                # Extract state_dim and action_dim from the model architecture
+                # For the actor_critic model, we can determine these from the layer dimensions
+                state_dim = self.actor_critic.actor[0].in_features
+                action_dim = self.actor_critic.mean.out_features
+                
+                # Option 1: Load the legacy model, then transfer its weights to the new model
+                try:
+                    # Create a legacy model instance with dimensions from our current model
+                    legacy_model = LegacyModel(state_dim, action_dim)
+                    legacy_model = legacy_model.to(device)
+                    
+                    # Direct load into legacy model
+                    legacy_model.load_state_dict(checkpoint)
+                    logger.info(f"Successfully loaded legacy model with state_dim={state_dim}, action_dim={action_dim}")
+                    
+                    # Now transfer key components to your new model architecture
+                    with torch.no_grad():
+                        # Map fc1 weights to actor first layer
+                        self.actor_critic.actor[0].weight.copy_(legacy_model.fc1.weight)
+                        self.actor_critic.actor[0].bias.copy_(legacy_model.fc1.bias)
+                        
+                        # Map fc2 weights to actor second layer 
+                        self.actor_critic.actor[2].weight.copy_(legacy_model.fc2.weight)
+                        self.actor_critic.actor[2].bias.copy_(legacy_model.fc2.bias)
+                        
+                        # Map fc3 weights to mean layer (output layer)
+                        self.actor_critic.mean.weight.copy_(legacy_model.fc3.weight)
+                        self.actor_critic.mean.bias.copy_(legacy_model.fc3.bias)
+                        
+                        # Initialize log_std with small values
+                        self.actor_critic.log_std.weight.fill_(-5)
+                        self.actor_critic.log_std.bias.fill_(-5)
+                        
+                    logger.info("Transferred weights from legacy model to new architecture")
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"Error during legacy model loading: {e}")
+                    
+                    # If we can extract dimensions from the checkpoint directly
+                    if isinstance(checkpoint, dict) and 'fc1.weight' in checkpoint:
+                        try:
+                            # Get dimensions from the weights in the checkpoint
+                            fc1_weight = checkpoint['fc1.weight']
+                            state_dim = fc1_weight.shape[1]  # Input dimension
+                            
+                            if 'fc3.weight' in checkpoint:
+                                fc3_weight = checkpoint['fc3.weight']
+                                action_dim = fc3_weight.shape[0]  # Output dimension
+                            else:
+                                # Default to 1 if we can't determine
+                                action_dim = 1
+                                
+                            logger.info(f"Extracted dimensions from checkpoint: state_dim={state_dim}, action_dim={action_dim}")
+                            
+                            # Create a new model instance with the legacy architecture
+                            self.actor_critic = LegacyModel(state_dim, action_dim).to(device)
+                            
+                            # Load the saved weights directly
+                            self.actor_critic.load_state_dict(checkpoint)
+                            logger.info("Successfully loaded by rebuilding model architecture")
+                            
+                            # Flag that we're using a legacy model so other components can adapt
+                            self.using_legacy_model = True
+                            
+                            return True
+                        except Exception as nested_e:
+                            logger.error(f"Error rebuilding model architecture: {nested_e}")
+                    else:
+                        logger.error("Could not determine model dimensions from checkpoint")
+                    
+                    # Initialize with default values if all else fails
+                    logger.info("Initializing with default values")
+                    return False
+            
+            # If it's not a legacy format, try the normal loading process
             if "actor_critic_state_dict" in checkpoint:
                 # If they're saved together (original expected format)
                 self.actor_critic.load_state_dict(checkpoint["actor_critic_state_dict"])
@@ -517,6 +626,22 @@ class ExitOptimizationModel:
             batch_size=batch_size,
             automatic_entropy_tuning=True,
         )
+        
+        # Initialize and fit scaler
+        self.scaler = StandardScaler()
+        
+        # Collect all states from training data to fit the scaler
+        all_states = []
+        for episode in training_data:
+            all_states.extend(episode.get("states", []))
+            
+        if all_states:
+            self.scaler.fit(np.array(all_states))
+            logger.info(f"Fitted StandardScaler on {len(all_states)} states")
+        else:
+            logger.warning("No states found in training data to fit scaler")
+            self.scaler = None # Ensure scaler is None if no data
+            
         metrics = {
             "epoch_rewards": [],
             "epoch_losses": [],
@@ -580,10 +705,18 @@ class ExitOptimizationModel:
                     next_state[0] = profit_pct
                     next_state[2] = new_position_size
                     self.agent.replay_buffer.push(state, np.array([exit_size]), reward, next_state, done)
+                    # Scale states before pushing to replay buffer
+                    scaled_state = self.scaler.transform(state.reshape(1, -1)).flatten() if self.scaler else state
+                    scaled_next_state = self.scaler.transform(next_state.reshape(1, -1)).flatten() if self.scaler else next_state
+                    
+                    self.agent.replay_buffer.push(scaled_state, np.array([exit_size]), reward, scaled_next_state, done)
+                    
                     if len(self.agent.replay_buffer) > batch_size:
                         for _ in range(updates_per_step):
+                            # Pass scaler to update method if needed (though update works on already scaled data)
                             value_loss, critic_loss, actor_loss, alpha_loss = self.agent.update(batch_size)
-                    state = next_state
+                            
+                    state = next_state # Use original next_state for the loop logic
                     episode_reward += reward
                     epoch_reward += reward
                     epoch_steps += 1
@@ -679,11 +812,17 @@ class ExitOptimizationModel:
             for i in range(len(states) - 1):
                 state = states[i].copy()
                 state[2] = position_size
-                action = self.agent.select_action(state, evaluate=True)
+                
+                # Select action using the agent, passing the scaler
+                action = self.agent.select_action(state, evaluate=True, scaler=self.scaler)
+                
                 if isinstance(action, int):
+                    # Discrete action mapping
                     exit_size = [0.0, 0.25, 0.33, 0.5, 1.0][action]
                 else:
+                    # Continuous action value (should be between 0 and 1 after tanh and scaling)
                     exit_size = float(action)
+                    # Ensure exit_size is within valid range [0, 1]
                     exit_size = max(0.0, min(1.0, exit_size))
                 actual_exit = min(position_size, exit_size)
                 new_position_size = position_size - actual_exit
@@ -856,7 +995,30 @@ class ExitOptimizationModel:
             np.clip(sharpe_ratio, -1, 1),
             np.clip(max_drawdown, 0, 1),
         ]
-        return np.array(features, dtype=np.float32)
+        # Check for and handle NaN or infinite values
+        features = np.array(features, dtype=np.float32)
+        if np.any(np.isnan(features)) or np.any(np.isinf(features)):
+            logger.warning(f"Detected NaN or infinite values in features: {features}")
+            # Replace NaN with 0 and infinite values with a large number (or clip)
+            features = np.nan_to_num(features, nan=0.0, posinf=1e10, neginf=-1e10)
+            # Re-clip features after handling NaN/inf if necessary, based on original clipping ranges
+            features[0] = np.clip(features[0], -20/20, 20/20) # profit_pct / 20
+            features[1] = np.clip(features[1], 0, 1) # time_in_trade
+            features[3] = np.clip(features[3], -1, 1) # price_to_entry
+            features[4] = np.clip(features[4], -1, 0) # price_to_high
+            features[5] = np.clip(features[5], 0, 1) # price_to_low
+            features[6] = np.clip(features[6], 0, 1) # rsi_14
+            features[7] = np.clip(features[7], 0, 1) # bb_position
+            features[8] = np.clip(features[8], -1, 1) # macd_hist
+            features[9] = np.clip(features[9], 0, 1) # volatility_5d / 5
+            features[10] = np.clip(features[10], 0, 1) # normalized_atr / 5
+            features[11] = np.clip(features[11], 0, 5/5) # volume_ratio_5 / 5
+            features[12] = np.clip(features[12], -1, 1) # market_trend
+            features[13] = np.clip(features[13], -1, 1) # sector_trend
+            features[14] = np.clip(features[14], -1, 1) # sharpe_ratio
+            features[15] = np.clip(features[15], 0, 1) # max_drawdown
+            logger.warning(f"Handled features: {features}")
+        return features
 
     def predict_exit_action(self, ohlcv_data: pd.DataFrame, position_data: Dict) -> Dict[str, Union[str, float]]:
         features = self._extract_features(ohlcv_data, position_data)
@@ -1277,7 +1439,9 @@ class ExitOptimizationModel:
         return export_dir
 
 
-exit_optimization_model = ExitOptimizationModel(model_path=settings.model.exit_model_path, use_sac=True)
+# Initialize the global exit optimization model instance without loading a model by default.
+# The model will be loaded explicitly when needed (e.g., when the trading system starts).
+exit_optimization_model = ExitOptimizationModel(model_path=None, use_sac=True)
 
 
 def evaluate_exit_strategy(ohlcv_data: pd.DataFrame, position_data: Dict, confidence_threshold: Optional[float] = None) -> Dict:
