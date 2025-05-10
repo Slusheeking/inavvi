@@ -9,13 +9,18 @@ This module contains the main trading system components:
 """
 
 import logging
+import os
+import sys
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from .data_pipeline import DataPipeline
-from .position_monitor import PositionMonitor
-from .screening import StockScreener
-from .trade_execution import OrderStatus, OrderType, TradeDirection, TradeExecutor, TradeResult
+# Add the project root directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+from src.core.data_pipeline import DataPipeline
+from src.core.position_monitor import PositionMonitor
+from src.core.screening import StockScreener
+from src.core.trade_execution import OrderStatus, OrderType, TradeDirection, TradeExecutor, TradeResult
 
 # Setup module logger
 logger = logging.getLogger(__name__)

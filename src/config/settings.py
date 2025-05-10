@@ -3,8 +3,14 @@ Configuration settings for the trading system.
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
+
+# Add the project root directory to the Python path
+project_root = str(Path(__file__).parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator

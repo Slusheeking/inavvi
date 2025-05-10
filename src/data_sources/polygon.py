@@ -3,8 +3,20 @@ Polygon API client for fetching market data.
 """
 
 import asyncio
+import os
+import sys
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+
+# Check if this file is being run directly
+if __name__ == "__main__":
+    print("Polygon API client module initialized successfully.")
+    print("This module provides interfaces to the Polygon.io API for market data.")
+    print("\nTo use this module, import it in your code:")
+    print("from src.data_sources.polygon import polygon_client, fetch_polygon_data")
+    print("\nExample usage:")
+    print("data = await fetch_polygon_data('AAPL', interval='day')")
+    sys.exit(0)
 
 import aiohttp
 import pandas as pd

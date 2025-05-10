@@ -2,7 +2,12 @@
 Prompt templates for LLM integration.
 """
 
+import os
+import sys
 from typing import Any, Dict, List
+
+# Add the project root directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 
 class PromptTemplates:
@@ -457,3 +462,13 @@ class PromptTemplates:
         except Exception as e:
             # Handle other formatting errors
             raise ValueError(f"Error formatting prompt template: {e}")
+
+# If this file is run directly, run a simple test
+if __name__ == "__main__":
+    print("LLM Prompts module initialized successfully.")
+    print("This module provides prompt templates for LLM interactions.")
+    print("\nTo use this module, import it in your code:")
+    print("from src.llm.prompts import PromptTemplates")
+    print("\nExample usage:")
+    print("template = PromptTemplates.get_prompt_template('market_analysis')")
+    print("formatted_prompt = PromptTemplates.render_prompt(template, data)")

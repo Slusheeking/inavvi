@@ -7,7 +7,13 @@ This module provides functionality for working with large language models:
 - LLM provider routing
 """
 
-from .parsing import (
+import os
+import sys
+
+# Add the project root directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+from src.llm.parsing import (
     extract_json_from_text,
     extract_market_analysis,
     extract_sentiment_score,
@@ -18,8 +24,8 @@ from .parsing import (
     parse_market_analysis,
     parse_trade_decision,
 )
-from .prompts import PromptTemplates
-from .router import LLMRouter, get_llm_router, llm_router, openrouter_client
+from src.llm.prompts import PromptTemplates
+from src.llm.router import LLMRouter, get_llm_router, llm_router, openrouter_client
 
 
 # Create module-level convenience functions that delegate to PromptTemplates class methods

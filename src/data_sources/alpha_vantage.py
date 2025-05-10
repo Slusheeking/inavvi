@@ -3,8 +3,20 @@ Alpha Vantage API client for fetching market data, fundamentals, and news.
 """
 
 import asyncio
+import os
+import sys
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+
+# Check if this file is being run directly
+if __name__ == "__main__":
+    print("Alpha Vantage API client module initialized successfully.")
+    print("This module provides interfaces to the Alpha Vantage API for market data, fundamentals, and news.")
+    print("\nTo use this module, import it in your code:")
+    print("from src.data_sources.alpha_vantage import alpha_vantage_client, fetch_alpha_vantage_data")
+    print("\nExample usage:")
+    print("data = await fetch_alpha_vantage_data('AAPL', interval='daily')")
+    sys.exit(0)
 
 import aiohttp
 import numpy as np

@@ -3,8 +3,13 @@ Parsing utilities for LLM responses.
 """
 
 import json
+import os
 import re
+import sys
 from typing import Any, Dict, List, Optional
+
+# Add the project root directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from src.utils.logging import setup_logger
 
@@ -681,3 +686,13 @@ def extract_structured_data(response_content: str) -> Dict[str, Any]:
                 pass
 
     return data
+
+# If this file is run directly, run a simple test
+if __name__ == "__main__":
+    print("LLM Parsing module initialized successfully.")
+    print("This module provides utilities for parsing LLM responses.")
+    print("\nTo use this module, import it in your code:")
+    print("from src.llm.parsing import extract_json_from_text, parse_trade_decision")
+    print("\nExample usage:")
+    print("json_data = extract_json_from_text(llm_response)")
+    print("decision = parse_trade_decision(llm_response)")

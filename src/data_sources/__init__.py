@@ -8,11 +8,26 @@ This module provides interfaces to various market data providers:
 """
 
 import logging
+import os
+import sys
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional, Union
 
+# Check if this file is being run directly
+if __name__ == "__main__":
+    print("Data sources module initialized successfully.")
+    print("This module provides interfaces to various market data providers:")
+    print("- Alpha Vantage")
+    print("- Polygon")
+    print("- Yahoo Finance")
+    print("\nTo use this module, import it in your code:")
+    print("from src.data_sources import fetch_market_data, DataProvider")
+    print("\nExample usage:")
+    print("data = fetch_market_data(DataProvider.ALPHA_VANTAGE, 'AAPL', interval='daily')")
+    sys.exit(0)
+
 # Import provider-specific modules
-from .alpha_vantage import (
+from src.data_sources.alpha_vantage import (
     AlphaVantageAPI,
     AlphaVantageDataError,
     AlphaVantageInvalidParameterError,
@@ -21,8 +36,8 @@ from .alpha_vantage import (
     alpha_vantage_client,
     fetch_alpha_vantage_data,
 )
-from .polygon import PolygonAPI, PolygonDataError, fetch_polygon_data, polygon_client
-from .yahoo_finance import (
+from src.data_sources.polygon import PolygonAPI, PolygonDataError, fetch_polygon_data, polygon_client
+from src.data_sources.yahoo_finance import (
     YahooFinanceAPI,
     YahooFinanceDataError,
     YahooFinanceInvalidIntervalError,

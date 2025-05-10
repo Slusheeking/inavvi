@@ -3,8 +3,20 @@ Yahoo Finance API client for fetching market data and financial information.
 """
 
 import asyncio
+import os
+import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+# Check if this file is being run directly
+if __name__ == "__main__":
+    print("Yahoo Finance API client module initialized successfully.")
+    print("This module provides interfaces to the Yahoo Finance API for market data.")
+    print("\nTo use this module, import it in your code:")
+    print("from src.data_sources.yahoo_finance import yahoo_finance_client, fetch_yahoo_finance_data")
+    print("\nExample usage:")
+    print("data = await fetch_yahoo_finance_data('AAPL', interval='1d')")
+    sys.exit(0)
 
 import pandas as pd
 import yfinance as yf

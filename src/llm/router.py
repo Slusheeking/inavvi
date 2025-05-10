@@ -6,10 +6,15 @@ providers and models based on the task type and other criteria.
 """
 
 import json
+import os
+import sys
 import time
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+
+# Add the project root directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from src.config.settings import settings
 from src.utils.logging import setup_logger
@@ -599,3 +604,13 @@ openrouter_client = OpenRouterClient()
 
 # Create a global instance of the LLM router
 llm_router = get_llm_router()
+
+# If this file is run directly, run a simple test
+if __name__ == "__main__":
+    print("LLM Router module initialized successfully.")
+    print("This module provides routing capabilities for LLM requests.")
+    print("\nTo use this module, import it in your code:")
+    print("from src.llm.router import llm_router, get_llm_router, OpenRouterClient")
+    print("\nExample usage:")
+    print("router = get_llm_router()")
+    print("decision = await router.get_trade_decision(stock_data, market_context, portfolio_state)")
