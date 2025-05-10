@@ -71,27 +71,44 @@ class RankingModel:
         try:
             model_path = Path(self.model_path)
             if model_path.exists():
-                # Load model
-                self.model = xgb.Booster()
-                self.model.load_model(str(model_path))
-                
-                # Load model metadata if it exists
-                metadata_path = model_path.with_suffix('.json')
-                if metadata_path.exists():
-                    with open(metadata_path, 'r') as f:
-                        metadata = json.load(f)
+                try:
+                    # Load model with version compatibility mode
+                    self.model = xgb.Booster()
+                    self.model.load_model(str(model_path))
                     
-                    self.feature_names = metadata.get('feature_names', [])
-                    self.feature_importance = metadata.get('feature_importance', {})
-                    self.last_trained = metadata.get('last_trained')
-                
-                logger.info(f"Model loaded from {model_path}")
-                return True
+                    # Load model metadata if it exists
+                    metadata_path = model_path.with_suffix('.json')
+                    if metadata_path.exists():
+                        with open(metadata_path, 'r') as f:
+                            metadata = json.load(f)
+                        
+                        self.feature_names = metadata.get('feature_names', [])
+                        self.feature_importance = metadata.get('feature_importance', {})
+                        self.last_trained = metadata.get('last_trained')
+                    
+                    logger.info(f"Model loaded from {model_path}")
+                    return True
+                except xgb.core.XGBoostError as xgb_error:
+                    # Handle XGBoost specific errors
+                    logger.error(f"XGBoost error loading model: {xgb_error}")
+                    logger.warning("Model format incompatible with current XGBoost version. Using fallback ranking method.")
+                    
+                    # Backup the incompatible model file
+                    backup_path = str(model_path) + ".backup"
+                    import shutil
+                    shutil.copy2(str(model_path), backup_path)
+                    logger.info(f"Backed up incompatible model to {backup_path}")
+                    
+                    # Set model to None to use simple ranking
+                    self.model = None
+                    return False
             else:
                 logger.warning(f"Model file not found at {model_path}")
                 return False
         except Exception as e:
             logger.error(f"Error loading model: {e}")
+            # Set model to None to use simple ranking
+            self.model = None
             return False
         
     def save_model(self) -> bool:

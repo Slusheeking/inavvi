@@ -21,7 +21,7 @@ torch>=2.3.0  # Updated for compatibility with stable-baselines3, pytorch-lightn
 transformers==4.38.0
 sentence-transformers==2.2.2
 huggingface_hub>=0.22.0
-xgboost==2.0.0  # Gradient boosting library
+xgboost==3.0.0  # Gradient boosting library
 
 # Additional ML libraries that caused conflicts (explicitly managed)
 thinc>=8.3.4,<8.4.0  # Pinned for compatibility with spacy 3.8.5

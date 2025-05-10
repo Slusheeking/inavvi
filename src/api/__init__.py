@@ -10,6 +10,6 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from src.api.endpoints import router as api_router
-from src.api.websocket import ConnectionManager, websocket_endpoint, start_background_tasks
+from src.api.websocket import ConnectionManager, manager as websocket_manager, websocket_endpoint, start_background_tasks
 
-__all__ = ["api_router", "ConnectionManager", "websocket_endpoint", "start_background_tasks"]
+__all__ = ["api_router", "ConnectionManager", "websocket_manager", "websocket_endpoint", "start_background_tasks"]

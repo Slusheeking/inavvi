@@ -2,6 +2,11 @@
 WebSocket handler for real-time updates from the trading system.
 """
 
+# Add the project root to the Python path
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 import asyncio
 import json
 from datetime import datetime
