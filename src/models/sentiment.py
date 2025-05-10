@@ -1,5 +1,5 @@
 """
-Sentiment analysis model for news and social media data.
+Sentiment analysis model for financial news and social media data.
 
 Uses state-of-the-art language models to analyze sentiment with entity-specific
 tracking and temporal analysis.
@@ -7,22 +7,16 @@ tracking and temporal analysis.
 import json
 import os
 import pickle
-import subprocess
-import sys
-import warnings
 from collections import defaultdict
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import networkx as nx
-import numpy as np
 import pandas as pd
 import nltk
 from nltk import word_tokenize, pos_tag, ne_chunk
 from nltk.chunk import tree2conlltags
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from textblob import TextBlob
@@ -32,19 +26,14 @@ from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTok
 from torch.optim import AdamW
 
 from src.config.settings import settings
-from src.utils.logging import setup_logger, log_execution_time
+from src.utils.logging import setup_logger
 from src.utils.redis_client import redis_client
-
-# Suppress specific warnings
-warnings.filterwarnings("ignore", message=".*`resume_download` is deprecated.*")
-warnings.filterwarnings("ignore", message=".*The `return_dict` argument.*")
-warnings.filterwarnings("ignore", message=".*Some weights of the model checkpoint.*")
 
 # Set up logger
 logger = setup_logger("sentiment_model")
 
-# Device configuration
-device = torch.device("cuda" if torch.cuda.is_available() and settings.advanced.use_gpu else "cpu")
+# Device configuration - using GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"Using device: {device}")
 
 # Default model configurations
@@ -58,12 +47,7 @@ DEFAULT_MODELS = {
         "name": "yiyanghkust/finbert-tone",
         "labels": ["negative", "neutral", "positive"],
         "max_length": 256,
-    },
-    "sector_bert": {
-        "name": "distilbert-base-uncased",
-        "labels": ["negative", "neutral", "positive"],
-        "max_length": 256,
-    },
+    }
 }
 
 
@@ -71,38 +55,19 @@ class SentimentDataset(Dataset):
     """Dataset for sentiment analysis."""
 
     def __init__(self, texts: List[str], labels: Optional[List[int]] = None, tokenizer=None, max_length: int = 256):
-        """
-        Initialize the dataset.
-
-        Args:
-            texts: List of text samples.
-            labels: Optional list of labels.
-            tokenizer: Tokenizer to use.
-            max_length: Maximum sequence length.
-        """
         self.texts = texts
         self.labels = labels
         self.tokenizer = tokenizer
         self.max_length = max_length
 
     def __len__(self) -> int:
-        """Return the number of samples in the dataset."""
         return len(self.texts)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """
-        Get a sample from the dataset.
-
-        Args:
-            idx: Index of the sample.
-
-        Returns:
-            Dictionary with tokenized inputs and optional labels.
-        """
         text = self.texts[idx]
         if self.tokenizer:
             encoding = self.tokenizer(
-              text,
+                text,
                 truncation=True,
                 padding="max_length",
                 max_length=self.max_length,
@@ -120,7 +85,6 @@ class EntitySentimentTracker:
     """Track sentiment for specific entities over time."""
 
     def __init__(self):
-        """Initialize the entity sentiment tracker."""
         self.entity_sentiments = defaultdict(list)
         self.entity_mentions = defaultdict(int)
         self.entity_importance = defaultdict(float)
@@ -129,16 +93,6 @@ class EntitySentimentTracker:
     def add_entity_sentiment(
         self, entity: str, sentiment: float, timestamp: str, source: Optional[str] = None, importance: float = 1.0
     ):
-        """
-        Add a sentiment record for an entity.
-
-        Args:
-            entity: Entity name.
-            sentiment: Sentiment score (-1 to 1).
-            timestamp: Timestamp of the sentiment.
-            source: Source of the sentiment (e.g., news article).
-            importance: Importance of this sentiment record.
-        """
         self.entity_sentiments[entity].append(
             {"timestamp": timestamp, "sentiment": sentiment, "source": source, "importance": importance}
         )
@@ -146,28 +100,10 @@ class EntitySentimentTracker:
         self.entity_importance[entity] += importance
 
     def add_entity_relationship(self, entity1: str, entity2: str, strength: float = 1.0):
-        """
-        Add a relationship between two entities.
-
-        Args:
-            entity1: First entity.
-            entity2: Second entity.
-            strength: Strength of the relationship.
-        """
         self.entity_relationships[entity1][entity2] += strength
         self.entity_relationships[entity2][entity1] += strength
 
     def get_entity_sentiment(self, entity: str, time_window: Optional[Tuple[datetime, datetime]] = None) -> float:
-        """
-        Get the sentiment for an entity, optionally within a time window.
-
-        Args:
-            entity: Entity name.
-            time_window: Optional time window (start_time, end_time).
-
-        Returns:
-            Average sentiment score.
-        """
         if entity not in self.entity_sentiments:
             return 0.0
         sentiment_records = self.entity_sentiments[entity]
@@ -185,16 +121,6 @@ class EntitySentimentTracker:
         return total_sentiment / total_importance if total_importance > 0 else 0.0
 
     def get_sentiment_trend(self, entity: str, num_periods: int = 5) -> List[Optional[float]]:
-        """
-        Get the sentiment trend for an entity.
-
-        Args:
-            entity: Entity name.
-            num_periods: Number of time periods to divide the data into.
-
-        Returns:
-            List of average sentiment values for each period.
-        """
         if entity not in self.entity_sentiments or not self.entity_sentiments[entity]:
             return []
         records = sorted(self.entity_sentiments[entity], key=lambda x: pd.to_datetime(x["timestamp"]))
@@ -221,28 +147,10 @@ class EntitySentimentTracker:
         return trend
 
     def get_most_important_entities(self, top_n: int = 10) -> List[Tuple[str, float]]:
-        """
-        Get the most important entities based on mentions and importance.
-
-        Args:
-            top_n: Number of entities to return.
-
-        Returns:
-            List of (entity, importance) tuples.
-        """
         entities = sorted(self.entity_importance.items(), key=lambda x: x[1], reverse=True)
         return entities[:top_n]
 
     def get_entity_network(self, min_relationship_strength: float = 0.5) -> nx.Graph:
-        """
-        Get a network of entity relationships.
-
-        Args:
-            min_relationship_strength: Minimum relationship strength to include.
-
-        Returns:
-            NetworkX graph object.
-        """
         G = nx.Graph()
         for entity, importance in self.entity_importance.items():
             G.add_node(entity, importance=importance, mentions=self.entity_mentions[entity])
@@ -269,17 +177,6 @@ class FinancialSentimentModel:
         temporal_tracking: bool = True,
         use_cache: bool = True,
     ):
-        """
-        Initialize the sentiment model.
-
-        Args:
-            model_path: Path to a fine-tuned model directory.
-            model_name: Pre-trained model name ('finbert', 'financial_roberta', 'sector_bert').
-            use_ensemble: Whether to use an ensemble of models.
-            entity_extraction: Whether to extract and track entity-specific sentiment.
-            temporal_tracking: Whether to track sentiment over time.
-            use_cache: Whether to use Redis cache for predictions.
-        """
         self.model_name = model_name
         self.use_ensemble = use_ensemble
         self.entity_extraction = entity_extraction
@@ -289,30 +186,28 @@ class FinancialSentimentModel:
         self.tokenizers: Dict[str, Any] = {}
         self.configs: Dict[str, Any] = {}
         self.model_config = DEFAULT_MODELS.get(model_name, DEFAULT_MODELS["finbert"])
-        if model_name not in DEFAULT_MODELS:
-            logger.warning(f"Unknown model '{model_name}', defaulting to FinBERT")
+        
         if entity_extraction:
             self.entity_tracker = EntitySentimentTracker()
             try:
-                # Ensure NLTK data is downloaded
-                nltk.download('punkt')
-                nltk.download('averaged_perceptron_tagger')
-                nltk.download('maxent_ne_chunker')
-                nltk.download('words')
-                nltk.download('averaged_perceptron_tagger_eng')
-                nltk.download('maxent_ne_chunker_tab')
+                nltk.download('punkt', quiet=True)
+                nltk.download('averaged_perceptron_tagger', quiet=True)
+                nltk.download('maxent_ne_chunker', quiet=True)
+                nltk.download('words', quiet=True)
                 logger.info("NLTK resources loaded for NER")
-                self.nlp = True  # Just a flag to indicate NLP is available
+                self.nlp = True
             except Exception as e:
                 logger.error(f"Failed to load NLTK resources for entity extraction: {e}")
                 self.nlp = None
         else:
             self.entity_tracker = None
             self.nlp = None
+            
         if use_ensemble:
             self._load_ensemble_models()
         else:
             self._load_model(model_path)
+            
         self.entity_dict = self._load_entity_dictionary()
         self.metrics = {
             "accuracy": 0.0,
@@ -333,12 +228,6 @@ class FinancialSentimentModel:
         }
 
     def _load_model(self, model_path: Optional[str] = None):
-        """
-        Load a single sentiment analysis model.
-
-        Args:
-            model_path: Path to a fine-tuned model.
-        """
         model_name = self.model_config["name"]
         try:
             if model_path:
@@ -374,7 +263,6 @@ class FinancialSentimentModel:
             raise
 
     def _load_ensemble_models(self):
-        """Load multiple models for ensemble prediction."""
         models_to_load = ["finbert", "financial_roberta"]
         for model_key in models_to_load:
             model_config = DEFAULT_MODELS[model_key]
@@ -393,12 +281,6 @@ class FinancialSentimentModel:
                 logger.error(f"Error loading ensemble model {model_name}: {e}")
 
     def _load_entity_dictionary(self) -> Dict[str, str]:
-        """
-        Load custom entity dictionary for financial entities.
-
-        Returns:
-            Dictionary of entities and their types.
-        """
         entity_dict = {}
         entity_file = os.path.join(settings.data_dir, "entities", "financial_entities.json")
         if os.path.exists(entity_file):
@@ -411,12 +293,6 @@ class FinancialSentimentModel:
         return entity_dict
 
     def save_model(self, save_dir: str):
-        """
-        Save the model to directory.
-
-        Args:
-            save_dir: Directory to save the model.
-        """
         try:
             os.makedirs(save_dir, exist_ok=True)
             if "primary" in self.models:
@@ -454,25 +330,6 @@ class FinancialSentimentModel:
         warmup_steps: int = 500,
         model_name: Optional[str] = None,
     ) -> Dict[str, List[float]]:
-        """
-        Fine-tune the model on financial data.
-
-        Args:
-            texts: List of text samples.
-            labels: List of sentiment labels (0=negative, 1=neutral, 2=positive).
-            eval_texts: Optional evaluation texts.
-            eval_labels: Optional evaluation labels.
-            epochs: Number of training epochs.
-            batch_size: Batch size.
-            learning_rate: Learning rate.
-            max_length: Maximum sequence length.
-            weight_decay: Weight decay for AdamW optimizer.
-            warmup_steps: Number of warmup steps for learning rate scheduler.
-            model_name: Optional base model name to use.
-
-        Returns:
-            Training history dictionary.
-        """
         max_length = max_length or self.model_config["max_length"]
         if model_name:
             logger.info(f"Loading new base model {model_name} for fine-tuning")
@@ -490,8 +347,8 @@ class FinancialSentimentModel:
             train_size = int(0.9 * len(train_dataset))
             eval_size = len(train_dataset) - train_size
             train_dataset, eval_dataset = torch.utils.data.random_split(train_dataset, [train_size, eval_size])
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-        eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+        eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
         optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         total_steps = len(train_loader) * epochs
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
@@ -570,25 +427,13 @@ class FinancialSentimentModel:
         return history
 
     def extract_entities(self, text: str) -> List[Dict]:
-        """
-        Extract named entities from text using NLTK.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            List of entity dictionaries with type and text.
-        """
         if not self.nlp:
             logger.warning("NLTK resources not available for entity extraction")
             return []
         try:
-            # Tokenize, POS tag, and perform NER
             tokens = word_tokenize(text)
             pos_tags = pos_tag(tokens)
             ne_tree = ne_chunk(pos_tags)
-            
-            # Convert the tree to a format we can process
             iob_tags = tree2conlltags(ne_tree)
             
             entities = []
@@ -596,20 +441,17 @@ class FinancialSentimentModel:
             in_entity = False
             char_index = 0
             
-            # Process the IOB tags to extract entities
             for word, pos, tag in iob_tags:
-                # Skip punctuation for character index calculation
                 if word in ",.;:!?()[]{}\"'":
-                    char_index += len(word) + 1  # +1 for space
+                    char_index += len(word) + 1
                     continue
                 
-                if tag.startswith('B-'):  # Beginning of entity
-                    if in_entity:  # If we were already tracking an entity, add it to the list
+                if tag.startswith('B-'):
+                    if in_entity:
                         current_entity["end"] = char_index - 1
                         entities.append(current_entity.copy())
                     
-                    # Start a new entity
-                    entity_type = tag[2:]  # Remove 'B-' prefix
+                    entity_type = tag[2:]
                     mapped_type = {
                         "ORGANIZATION": "company",
                         "PERSON": "person",
@@ -620,7 +462,6 @@ class FinancialSentimentModel:
                         "PERCENT": "financial",
                     }.get(entity_type, "other")
                     
-                    # Check custom entity dictionary
                     if word.lower() in self.entity_dict:
                         mapped_type = self.entity_dict[word.lower()]
                     
@@ -628,23 +469,22 @@ class FinancialSentimentModel:
                         "text": word,
                         "type": mapped_type,
                         "start": char_index,
-                        "end": 0  # Will be set when entity ends
+                        "end": 0
                     }
                     in_entity = True
                 
-                elif tag.startswith('I-'):  # Inside of entity
+                elif tag.startswith('I-'):
                     if in_entity:
                         current_entity["text"] += " " + word
                 
-                else:  # Outside of entity (O tag)
+                else:
                     if in_entity:
                         current_entity["end"] = char_index - 1
                         entities.append(current_entity.copy())
                         in_entity = False
                 
-                char_index += len(word) + 1  # +1 for space
+                char_index += len(word) + 1
             
-            # Add the last entity if we were tracking one
             if in_entity:
                 current_entity["end"] = char_index - 1
                 entities.append(current_entity)
@@ -655,16 +495,6 @@ class FinancialSentimentModel:
             return []
 
     def analyze_sentiment(self, text: str, extract_entities: Optional[bool] = None) -> Dict[str, Any]:
-        """
-        Analyze the sentiment of a text.
-
-        Args:
-            text: Text to analyze.
-            extract_entities: Whether to extract entities (overrides instance setting).
-
-        Returns:
-            Dictionary of sentiment scores and entities.
-        """
         if not text or not isinstance(text, str):
             logger.error("Invalid or empty text input")
             return {"sentiment": {}, "entities": []}
@@ -682,47 +512,36 @@ class FinancialSentimentModel:
             if entities and self.entity_tracker:
                 for entity in entities:
                     entity_sentiment = self._get_entity_sentiment(text, entity)
-            if entity_sentiment:
-                item.update(entity_sentiment)
-            if self.temporal_tracking:
-                self.entity_tracker.add_entity_sentiment(
-                    entity["text"],
-                    entity_sentiment["sentiment_score"],
-                    datetime.now().isoformat(),
-                    importance=entity_sentiment["relevance_score"],
-                )
+                    entity.update(entity_sentiment)
+                    if self.temporal_tracking:
+                        self.entity_tracker.add_entity_sentiment(
+                            entity["text"],
+                            entity_sentiment["sentiment_score"],
+                            datetime.now().isoformat(),
+                            importance=entity_sentiment["relevance_score"],
+                        )
         result = {"sentiment": sentiment_scores, "entities": entities}
         if extract_entities and len(entities) > 1 and self.entity_tracker:
             for i, entity1 in enumerate(entities):
-                for entity2 in entities[i + 1 :]:
+                for entity2 in entities[i + 1:]:
                     self.entity_tracker.add_entity_relationship(entity1["text"], entity2["text"], strength=1.0)
         if self.use_cache:
             redis_client.set(cache_key, json.dumps(result), ex=3600)
         return result
 
     def _get_sentiment_scores(self, text: str) -> Dict[str, float]:
-        """
-        Get sentiment scores for text from model.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary of sentiment scores.
-        """
-        text = text[:1024]  # Truncate to avoid tokenizer limits
+        text = text[:1024]
         if self.use_ensemble:
             ensemble_scores = {}
             for model_key, model in self.models.items():
                 tokenizer = self.tokenizers[model_key]
                 inputs = tokenizer(
-    text,
-    truncation=True,
-    padding=True,
-    max_length=self.model_config["max_length"],
-    return_tensors="pt",
-).to(device) # Corrected: move .to(device) here
-                # inputs = {k: v.to(device) for k, v in inputs.items()} # This line is now redundant
+                    text,
+                    truncation=True,
+                    padding=True,
+                    max_length=self.model_config["max_length"],
+                    return_tensors="pt",
+                ).to(device)
                 with torch.no_grad():
                     outputs = model(**inputs)
                     logits = outputs.logits
@@ -757,16 +576,6 @@ class FinancialSentimentModel:
             return scores
 
     def _get_entity_sentiment(self, text: str, entity: Dict) -> Dict[str, Any]:
-        """
-        Get sentiment specific to an entity.
-
-        Args:
-            text: Full text.
-            entity: Entity dictionary with text and position.
-
-        Returns:
-            Dictionary with entity sentiment scores.
-        """
         entity_text = entity["text"]
         start_pos = max(0, entity["start"] - 100)
         end_pos = min(len(text), entity["end"] + 100)
@@ -784,36 +593,18 @@ class FinancialSentimentModel:
         }
 
     def analyze_texts(self, texts: List[str]) -> List[Dict[str, Any]]:
-        """
-        Analyze the sentiment of multiple texts.
-
-        Args:
-            texts: List of texts to analyze.
-
-        Returns:
-            List of sentiment analysis results.
-        """
         if not texts:
             logger.warning("Empty text list provided")
             return []
         results = []
         batch_size = 16
         for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
+            batch_texts = texts[i:i + batch_size]
             batch_results = [self.analyze_sentiment(text) for text in batch_texts]
             results.extend(batch_results)
         return results
 
     def analyze_news_items(self, news_items: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-        """
-        Analyze the sentiment of news items.
-
-        Args:
-            news_items: List of news items with 'title' and 'summary' fields.
-
-        Returns:
-            List of news items with sentiment scores.
-        """
         if not news_items:
             logger.warning("Empty news items list provided")
             return []
@@ -842,15 +633,6 @@ class FinancialSentimentModel:
         return results
 
     def get_overall_sentiment(self, news_items: List[Dict[str, Any]]) -> Dict[str, float]:
-        """
-        Calculate overall sentiment from a list of news items.
-
-        Args:
-            news_items: List of news items with sentiment scores.
-
-        Returns:
-            Dictionary with overall sentiment scores.
-        """
         if not news_items:
             return {"positive": 0.0, "neutral": 0.0, "negative": 0.0, "overall_score": 0.0}
         sentiments = {label: 0.0 for label in self.model_config["labels"]}
@@ -871,16 +653,6 @@ class FinancialSentimentModel:
         return sentiments
 
     def get_entity_sentiments(self, time_window: Optional[Tuple[datetime, datetime]] = None, top_n: int = 10) -> List[Dict]:
-        """
-        Get sentiment for tracked entities.
-
-        Args:
-            time_window: Optional time window (start_time, end_time).
-            top_n: Number of top entities to return.
-
-        Returns:
-            List of entity sentiment dictionaries.
-        """
         if not self.entity_tracker:
             return []
         important_entities = self.entity_tracker.get_most_important_entities(top_n=top_n)
@@ -901,15 +673,6 @@ class FinancialSentimentModel:
         return results
 
     def get_entity_network(self, min_relationship_strength: float = 0.5) -> Dict[str, List]:
-        """
-        Get the entity relationship network.
-
-        Args:
-            min_relationship_strength: Minimum relationship strength.
-
-        Returns:
-            Dictionary with network data.
-        """
         if not self.entity_tracker:
             return {"nodes": [], "edges": []}
         G = self.entity_tracker.get_entity_network(min_relationship_strength)
@@ -931,17 +694,6 @@ class FinancialSentimentModel:
     def generate_sentiment_report(
         self, news_items: List[Dict], include_entities: bool = True, include_network: bool = True
     ) -> Dict:
-        """
-        Generate a comprehensive sentiment analysis report.
-
-        Args:
-            news_items: List of news items to analyze.
-            include_entities: Whether to include entity analysis.
-            include_network: Whether to include entity network.
-
-        Returns:
-            Report dictionary.
-        """
         analyzed_items = self.analyze_news_items(news_items)
         overall_sentiment = self.get_overall_sentiment(analyzed_items)
         positive_items = [item for item in analyzed_items if item.get("sentiment_score", 0) > 0.2]
@@ -973,7 +725,7 @@ class FinancialSentimentModel:
                     try:
                         timestamps.append(pd.to_datetime(item[key]))
                         break
-                    except:
+                    except ValueError:
                         continue
         if timestamps:
             time_sorted_items = [(ts, item) for ts, item in zip(timestamps, analyzed_items)]
@@ -999,15 +751,6 @@ class FinancialSentimentModel:
         return report
 
     def export_model(self, output_dir: Optional[str] = None) -> str:
-        """
-        Export the model for deployment.
-
-        Args:
-            output_dir: Optional output directory.
-
-        Returns:
-            Path to exported model.
-        """
         if output_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_dir = os.path.join(settings.models_dir, "exports", f"sentiment_model_{timestamp}")
@@ -1023,30 +766,11 @@ class FinancialSentimentModel:
         }
         with open(os.path.join(pipeline_dir, "config.json"), "w") as f:
             json.dump(pipeline_config, f, indent=2)
-        with open(os.path.join(output_dir, "README.md"), "w") as f:
-            f.write(f"# Financial Sentiment Analysis Model\n\n")
-            f.write(f"Exported on: {datetime.now().isoformat()}\n\n")
-            f.write(f"Base model: {self.model_config['name']}\n")
-            f.write(f"Labels: {', '.join(self.model_config['labels'])}\n\n")
-            if self.metrics:
-                f.write("## Performance Metrics\n\n")
-                f.write(f"- Accuracy: {self.metrics['accuracy']:.4f}\n")
-                f.write(f"- Precision: {self.metrics['precision']:.4f}\n")
-                f.write(f"- Recall: {self.metrics['recall']:.4f}\n")
-                f.write(f"- F1 Score: {self.metrics['f1']:.4f}\n\n")
-            f.write("## Usage\n\n")
-            f.write("```python\n")
-            f.write("from src.models.sentiment import FinancialSentimentModel\n\n")
-            f.write("# Load the model\n")
-            f.write(f"model = FinancialSentimentModel(model_path='{output_dir}')\n\n")
-            f.write("# Analyze text\n")
-            f.write("result = model.analyze_sentiment('Apple reported strong earnings.')\n")
-            f.write("print(result)\n")
-            f.write("```\n")
         logger.info(f"Model exported to {output_dir}")
         return output_dir
 
 
+# Create global instance
 sentiment_model = FinancialSentimentModel(
     model_path=getattr(settings.model, "sentiment_model_path", None),
     model_name="finbert",
@@ -1068,7 +792,7 @@ def analyze_news_batch(news_items: List[Dict[str, str]]) -> List[Dict[str, Any]]
     """Analyze sentiment of a batch of news items."""
     if sentiment_model is None:
         logger.error("Sentiment model not available")
-        return {"error": "Sentiment model not available"}
+        return [{"error": "Sentiment model not available"}]
     return sentiment_model.analyze_news_items(news_items)
 
 
@@ -1086,180 +810,3 @@ def get_entity_sentiment_network() -> Dict[str, List]:
         logger.error("Sentiment model or entity tracker not available")
         return {"nodes": [], "edges": []}
     return sentiment_model.get_entity_network()
-
-
-async def train_sentiment_model(training_data: Optional[Dict] = None, use_default_data: bool = True) -> Dict:
-    """
-    Train or fine-tune the sentiment model.
-
-    Args:
-        training_data: Optional custom training data.
-        use_default_data: Whether to use default financial sentiment data.
-
-    Returns:
-        Training metrics.
-    """
-    if sentiment_model is None:
-        logger.error("Cannot train: No sentiment model available")
-        return {"error": "No sentiment model available"}
-    if training_data is None and use_default_data:
-        training_data = _load_default_training_data()
-    if not training_data or "texts" not in training_data or "labels" not in training_data:
-        logger.error("Invalid or missing training data")
-        return {"error": "Invalid or missing training data"}
-    try:
-        logger.info(f"Training sentiment model with {len(training_data['texts'])} samples")
-        history = sentiment_model.fine_tune(
-            texts=training_data["texts"],
-            labels=training_data["labels"],
-            eval_texts=training_data.get("eval_texts"),
-            eval_labels=training_data.get("eval_labels"),
-            epochs=3,
-            batch_size=16,
-            learning_rate=2e-5,
-        )
-        sentiment_model.save_model(getattr(settings.model, "sentiment_model_path", None))
-        return {"status": "success", "history": history, "metrics": sentiment_model.metrics}
-    except Exception as e:
-        logger.error(f"Error training sentiment model: {e}")
-        return {"error": str(e)}
-
-
-def _load_default_training_data() -> Dict[str, List]:
-    """
-    Load default financial sentiment training data.
-
-    Returns:
-        Dictionary with texts and labels.
-    """
-    data_path = os.path.join(settings.data_dir, "sentiment", "financial_sentiment_data.json")
-    if os.path.exists(data_path):
-        try:
-            with open(data_path, "r") as f:
-                data = json.load(f)
-            logger.info(f"Loaded default sentiment training data with {len(data.get('texts', []))} samples")
-            return data
-        except Exception as e:
-            logger.error(f"Error loading default sentiment data: {e}")
-    texts = [
-        "The company reported record profits for the quarter.",
-        "Shares plummeted after disappointing earnings.",
-        "Market remained stable during trading.",
-        "Investors are concerned about high debt levels.",
-        "New product launch exceeded expectations.",
-        "Expansion into new markets announced.",
-        "Revenue growth slowed unexpectedly.",
-        "Board approved a share buyback program.",
-        "Economic indicators suggest a recession.",
-        "Merger deal approved by regulators.",
-    ]
-    labels = [2, 0, 1, 0, 2, 2, 0, 2, 0, 1]  # 0=negative, 1=neutral, 2=positive
-    return {"texts": texts, "labels": labels}
-
-
-async def schedule_sentiment_model_training() -> bool:
-    """Schedule sentiment model training to run during off-hours."""
-    try:
-        current_hour = datetime.now().hour
-        is_off_hours = current_hour < 9 or current_hour > 16
-        if is_off_hours:
-            logger.info("Scheduling sentiment model training during off-hours")
-            is_weekend = datetime.now().weekday() >= 5
-            if is_weekend:
-                logger.info("Running full sentiment model training (weekend schedule)")
-                training_data = await _gather_enhanced_training_data()
-                if training_data and len(training_data.get("texts", [])) > 100:
-                    await train_sentiment_model(training_data, use_default_data=False)
-                else:
-                    await train_sentiment_model(use_default_data=True)
-            else:
-                logger.info("Running incremental sentiment model update (weekday schedule)")
-                recent_data = await _gather_recent_news_data()
-                if recent_data and len(recent_data.get("texts", [])) > 10:
-                    try:
-                        sentiment_model.fine_tune(
-                            texts=recent_data["texts"],
-                            labels=recent_data["labels"],
-                            epochs=1,
-                            batch_size=8,
-                        )
-                    except Exception as e:
-                        logger.error(f"Error in incremental update: {e}")
-            return True
-        else:
-            logger.info("Not in off-hours, skipping scheduled training")
-            return False
-    except Exception as e:
-        logger.error(f"Error in schedule_sentiment_model_training: {e}")
-        return False
-
-
-async def _gather_enhanced_training_data() -> Dict[str, List]:
-    """
-    Gather enhanced training data from multiple sources.
-
-    Returns:
-        Dictionary with texts and labels.
-    """
-    logger.info("Gathering enhanced training data")
-    # In a real implementation, this would fetch data from news APIs, financial datasets, etc.
-    data_path = os.path.join(settings.data_dir, "sentiment", "enhanced_sentiment_data.json")
-    if os.path.exists(data_path):
-        try:
-            with open(data_path, "r") as f:
-                data = json.load(f)
-            return data
-        except Exception as e:
-            logger.error(f"Error loading enhanced sentiment data: {e}")
-    
-    # Return simple synthetically generated data if no real data is available
-    texts = []
-    labels = []
-    
-    # Generate some positive samples
-    for i in range(50):
-        texts.append(f"Company reports strong quarterly results, exceeding analyst expectations.")
-        labels.append(2)  # positive
-    
-    # Generate some negative samples
-    for i in range(50):
-        texts.append(f"Stock drops following earnings miss and lowered guidance.")
-        labels.append(0)  # negative
-        
-    # Generate some neutral samples
-    for i in range(50):
-        texts.append(f"Market shows mixed trading as investors await economic data.")
-        labels.append(1)  # neutral
-        
-    return {"texts": texts, "labels": labels}
-
-
-async def _gather_recent_news_data() -> Dict[str, List]:
-    """
-    Gather recent financial news for incremental model updates.
-
-    Returns:
-        Dictionary with texts and labels.
-    """
-    logger.info("Gathering recent news data")
-    # In a real implementation, this would fetch recent news from APIs
-    data_path = os.path.join(settings.data_dir, "sentiment", "recent_news_data.json")
-    if os.path.exists(data_path):
-        try:
-            with open(data_path, "r") as f:
-                data = json.load(f)
-            return data
-        except Exception as e:
-            logger.error(f"Error loading recent news data: {e}")
-    
-    # Return minimal synthetic data if no real data is available
-    texts = [
-        "Market closes higher on positive economic outlook",
-        "Tech sector rallies on earnings surprises",
-        "Concerns grow over inflation impact on consumer spending",
-        "Energy stocks decline amid falling oil prices",
-        "Financial sector stable as banks report solid earnings"
-    ]
-    labels = [2, 2, 0, 0, 1]  # 2=positive, 0=negative, 1=neutral
-    
-    return {"texts": texts, "labels": labels}

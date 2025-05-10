@@ -4,7 +4,6 @@ Utilities module for the trading system.
 This module provides common utilities:
 - Logging configuration
 - Redis client
-- Database client
 - Memory caching
 - Performance monitoring
 """
@@ -14,7 +13,6 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, cast
 
-from .db_client import timescaledb_client
 from .logging import get_logger, setup_logger
 from .redis_client import redis_client
 
@@ -105,7 +103,6 @@ __all__ = [
     "get_logger",
     # Clients
     "redis_client",
-    "timescaledb_client",
     # Performance utilities
     "timed",
     "redis_cached",

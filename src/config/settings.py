@@ -6,15 +6,14 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings
 
 # Add the project root directory to the Python path
 project_root = str(Path(__file__).parent.parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-
-from dotenv import load_dotenv
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings
 
 # Load environment variables from .env file
 load_dotenv()
@@ -48,7 +47,6 @@ class DatabaseSettings(BaseSettings):
     redis_host: str = Field("localhost", env="REDIS_HOST")
     redis_port: int = Field(6379, env="REDIS_PORT")
     redis_password: Optional[str] = Field(None, env="REDIS_PASSWORD")
-    timescaledb_url: str = Field(..., env="TIMESCALEDB_URL")
 
     model_config = {
         "env_file": ".env",

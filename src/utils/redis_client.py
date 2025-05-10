@@ -1,5 +1,10 @@
 """
 Redis client for the trading system.
+
+This module implements the Redis client that handles both Redis Cache and Redis Store
+components as shown in the system architecture. The Redis Cache stores raw data from
+data sources, while the Redis Store contains processed data from ML models and broker
+interactions.
 """
 
 import json
@@ -19,12 +24,26 @@ logger = setup_logger("redis_client")
 class RedisClient:
     """
     Redis client for storing and retrieving trading data.
-
+    
+    Implements both Redis Cache and Redis Store functionality:
+    
+    Redis Cache:
+    - Raw market data from data sources (Alpha Vantage, Polygon, Yahoo)
+    - Temporary storage for position data and news/sentiment
+    
+    Redis Store:
+    - Processed market data from ML models
+    - Position status from monitoring
+    - Sentiment scores from analysis
+    - Order status from broker
+    - Trading signals
+    
     Provides specialized methods for:
     - Stock data (prices, indicators)
     - Watchlists and rankings
-    - Position data
+    - Position data (active and closed)
     - Trading signals
+    - System state
     """
 
     def __init__(self):
@@ -532,6 +551,207 @@ class RedisClient:
         key = f"signals:{signal_type}:{symbol}"
         return self.delete(key)
 
+    # ---------- Closed Position Operations ----------
+    
+    def set_closed_position(self, symbol: str, position_data: Dict[str, Any]) -> bool:
+        """
+        Store closed position data.
+        
+        Args:
+            symbol: Stock symbol
+            position_data: Position data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        key = f"positions:closed:{symbol}:{pd.Timestamp.now().isoformat()}"
+        return self.set(key, position_data)
+    
+    def get_all_closed_positions(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get all closed positions.
+        
+        Returns:
+            Dictionary of closed positions, with the most recent position for each symbol
+        """
+        pattern = "positions:closed:*"
+        keys = self._conn.keys(pattern)
+        
+        positions = {}
+        # Group positions by symbol
+        symbol_positions = {}
+        
+        for key in keys:
+            key_str = key.decode("utf-8")
+            parts = key_str.split(":")
+            symbol = parts[2]
+            timestamp = ":".join(parts[3:])
+            
+            position_data = self.get(key_str)
+            if position_data:
+                if symbol not in symbol_positions:
+                    symbol_positions[symbol] = []
+                position_data["close_timestamp"] = timestamp
+                symbol_positions[symbol].append(position_data)
+        
+        # For each symbol, get the most recent position
+        for symbol, pos_list in symbol_positions.items():
+            # Sort by close timestamp (most recent first)
+            pos_list.sort(key=lambda x: x.get("close_timestamp", ""), reverse=True)
+            # Use the most recent position
+            positions[symbol] = pos_list[0]
+        
+        return positions
+    
+    def get_all_closed_positions_history(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get all closed positions with full history.
+        
+        Returns:
+            Dictionary of closed positions, with a list of all positions for each symbol
+        """
+        pattern = "positions:closed:*"
+        keys = self._conn.keys(pattern)
+        
+        positions = {}
+        
+        for key in keys:
+            key_str = key.decode("utf-8")
+            parts = key_str.split(":")
+            symbol = parts[2]
+            timestamp = ":".join(parts[3:])
+            
+            position_data = self.get(key_str)
+            if position_data:
+                if symbol not in positions:
+                    positions[symbol] = []
+                position_data["close_timestamp"] = timestamp
+                positions[symbol].append(position_data)
+        
+        return positions
+    
+    # ---------- Trading Signals Operations (Extended) ----------
+    
+    def get_all_trading_signals(self, signal_type: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Get all trading signals of a specific type.
+        
+        Args:
+            signal_type: Type of signal ('entry', 'exit', 'adjust')
+            
+        Returns:
+            Dictionary of signals by symbol
+        """
+        pattern = f"signals:{signal_type}:*"
+        keys = self._conn.keys(pattern)
+        
+        signals = {}
+        for key in keys:
+            symbol = key.decode("utf-8").split(":")[-1]
+            signal_data = self.get(key.decode("utf-8"))
+            if signal_data:
+                signals[symbol] = signal_data
+        
+        return signals
+    
+    # ---------- Cache Operations ----------
+    
+    def cache_data(self, key: str, data: Any, expiry: Optional[int] = None) -> bool:
+        """
+        Store data in Redis Cache with optional expiry.
+        
+        Args:
+            key: Cache key
+            data: Data to cache
+            expiry: Optional expiry time in seconds
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        cache_key = f"cache:{key}"
+        return self.set(cache_key, data, expiry=expiry)
+    
+    def get_cached_data(self, key: str) -> Any:
+        """
+        Get data from Redis Cache.
+        
+        Args:
+            key: Cache key
+            
+        Returns:
+            Cached data if found, None otherwise
+        """
+        cache_key = f"cache:{key}"
+        return self.get(cache_key)
+    
+    # ---------- ML Model Data Operations ----------
+    
+    def store_model_output(self, model_name: str, data_type: str, data: Any) -> bool:
+        """
+        Store ML model output in Redis Store.
+        
+        Args:
+            model_name: Name of the model (e.g., 'market_analysis', 'position_monitor')
+            data_type: Type of data
+            data: Model output data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        key = f"models:{model_name}:{data_type}"
+        return self.set(key, data)
+    
+    def get_model_output(self, model_name: str, data_type: str) -> Any:
+        """
+        Get ML model output from Redis Store.
+        
+        Args:
+            model_name: Name of the model
+            data_type: Type of data
+            
+        Returns:
+            Model output data if found, None otherwise
+        """
+        key = f"models:{model_name}:{data_type}"
+        return self.get(key)
+    
+    # ---------- Broker Operations ----------
+    
+    def store_broker_data(self, data_type: str, data: Any, symbol: Optional[str] = None) -> bool:
+        """
+        Store broker data in Redis Store.
+        
+        Args:
+            data_type: Type of data (e.g., 'order', 'position', 'account')
+            data: Broker data
+            symbol: Optional stock symbol
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if symbol:
+            key = f"broker:{data_type}:{symbol}"
+        else:
+            key = f"broker:{data_type}"
+        return self.set(key, data)
+    
+    def get_broker_data(self, data_type: str, symbol: Optional[str] = None) -> Any:
+        """
+        Get broker data from Redis Store.
+        
+        Args:
+            data_type: Type of data
+            symbol: Optional stock symbol
+            
+        Returns:
+            Broker data if found, None otherwise
+        """
+        if symbol:
+            key = f"broker:{data_type}:{symbol}"
+        else:
+            key = f"broker:{data_type}"
+        return self.get(key)
+    
     # ---------- System State Operations ----------
 
     def set_system_state(self, state: Dict[str, Any]) -> bool:
