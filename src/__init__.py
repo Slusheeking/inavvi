@@ -16,7 +16,7 @@ from .core import (
     TradeExecutor,
     TradeResult,
 )
-from .models import PatternRecognitionModel, RankingModel, SentimentModel
+from .models import PatternRecognitionModel, RankingModel, FinancialSentimentModel
 from .utils import get_logger, setup_logger
 
 # Define public exports
@@ -33,7 +33,7 @@ __all__ = [
     "TradeDirection",
     # Models
     "RankingModel",
-    "SentimentModel",
+    "FinancialSentimentModel",
     "PatternRecognitionModel",
     # Utilities
     "setup_logger",

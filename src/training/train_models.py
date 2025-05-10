@@ -56,7 +56,7 @@ try:
     GPU_AVAILABLE = torch.cuda.is_available()
     GPU_COUNT = torch.cuda.device_count() if GPU_AVAILABLE else 0
     logger.info(f"PyTorch detected {GPU_COUNT} GPUs")
-except:
+except ImportError:
     logger.warning("Could not check GPU availability with PyTorch")
     GPU_AVAILABLE = False
     GPU_COUNT = 0
@@ -72,10 +72,10 @@ from src.utils.logging import setup_logger
 from src.utils.redis_client import redis_client
 
 # Import model modules
-from src.models.pattern_recognition import PatternRecognitionModel
-from src.models.ranking_model import RankingModel
-from src.models.sentiment import FinancialSentimentModel
-from src.models.exit_optimization import ExitOptimizationModel
+from src.models.pattern_recognition import PatternRecognitionModel, pattern_recognition_model
+from src.models.ranking_model import RankingModel, rank_opportunities, get_model_weights
+from src.models.sentiment import FinancialSentimentModel, analyze_sentiment, analyze_news_batch
+from src.models.exit_optimization import ExitOptimizationModel, evaluate_exit_strategy, train_exit_model
 
 # Try to import GPU acceleration libraries
 try:
@@ -93,7 +93,7 @@ try:
         try:
             from dask_cuda import LocalCUDACluster
             CUDA_CLUSTER_AVAILABLE = True
-        except:
+        except ImportError:
             CUDA_CLUSTER_AVAILABLE = False
             logger.warning("dask_cuda not available, falling back to CPU dask.distributed")
         
@@ -115,6 +115,7 @@ except Exception as e:
 # Initialize MLflow
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "mlruns")
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+
 
 class ModelTrainer:
     """
@@ -569,7 +570,7 @@ class ModelTrainer:
         
         # Extract features using the ranking model
         try:
-            training_data = ranking_model.generate_training_data(
+            training_data = self._generate_ranking_training_data(
                 self.data, 
                 target_threshold=target_threshold
             )
@@ -590,6 +591,111 @@ class ModelTrainer:
         
         except Exception as e:
             logger.error(f"Error generating ranking features: {e}")
+    
+    def _generate_ranking_training_data(self, historical_data, target_threshold=1.5, lookback_days=10, forward_days=5):
+        """
+        Generate training data for the ranking model.
+        
+        Args:
+            historical_data: Dictionary of DataFrames with historical price data
+            target_threshold: Percentage threshold for positive examples
+            lookback_days: Number of days to look back for features
+            forward_days: Number of days to look forward for target
+            
+        Returns:
+            DataFrame with features and target labels
+        """
+        all_features = []
+        
+        for symbol, df in historical_data.items():
+            # Convert to pandas if using GPU
+            if self.use_gpu and isinstance(df, cudf.DataFrame):
+                df = df.to_pandas()
+            
+            if len(df) < lookback_days + forward_days + 5:  # Need enough data
+                continue
+            
+            # Create features for each valid start point
+            for i in range(lookback_days, len(df) - forward_days):
+                try:
+                    # Extract lookback window for feature calculation
+                    window = df.iloc[i-lookback_days:i]
+                    
+                    # Calculate target (forward return)
+                    current_price = df["close"].iloc[i]
+                    future_price = df["close"].iloc[i+forward_days]
+                    forward_return = (future_price / current_price - 1) * 100
+                    
+                    # Binary classification target
+                    target = 1 if forward_return >= target_threshold else 0
+                    
+                    # Extract features
+                    feature_dict = self._extract_ranking_features(window, symbol)
+                    
+                    # Add metadata and target
+                    feature_dict["symbol"] = symbol
+                    feature_dict["date"] = df.index[i]
+                    feature_dict["target"] = target
+                    feature_dict["forward_return"] = forward_return
+                    
+                    all_features.append(feature_dict)
+                except Exception as e:
+                    logger.debug(f"Error creating features for {symbol} at index {i}: {e}")
+                    continue
+        
+        if not all_features:
+            return pd.DataFrame()
+        
+        # Combine all features into a DataFrame
+        features_df = pd.DataFrame(all_features)
+        
+        return features_df
+    
+    def _extract_ranking_features(self, df, symbol):
+        """Extract features for ranking model from OHLCV data."""
+        features = {}
+        
+        # Price momentum features
+        for period in [1, 3, 5, 10]:
+            if len(df) > period:
+                features[f"return_{period}d"] = (df["close"].iloc[-1] / df["close"].iloc[-period-1] - 1) * 100
+        
+        # Volatility features
+        if len(df) > 5:
+            features["volatility_5d"] = df["close"].pct_change().std() * 100
+        
+        # Volume features
+        if "volume" in df.columns and len(df) > 5:
+            features["volume_ratio_5d"] = df["volume"].iloc[-1] / df["volume"].iloc[-6:-1].mean()
+        
+        # Technical indicators
+        if len(df) > 14:
+            # RSI
+            delta = df["close"].diff()
+            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+            loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+            rs = gain / loss
+            features["rsi_14"] = 100 - (100 / (1 + rs.iloc[-1])) if not pd.isna(rs.iloc[-1]) else 50
+        
+        if len(df) > 20:
+            # Bollinger Bands
+            ma20 = df["close"].rolling(20).mean().iloc[-1]
+            std20 = df["close"].rolling(20).std().iloc[-1]
+            features["bb_width"] = (2 * std20) / ma20 if ma20 > 0 else 0
+            features["price_to_upper_band"] = (df["close"].iloc[-1] - (ma20 + 2 * std20)) / ma20 if ma20 > 0 else 0
+            features["price_to_lower_band"] = (df["close"].iloc[-1] - (ma20 - 2 * std20)) / ma20 if ma20 > 0 else 0
+        
+        # Add symbol-specific features (e.g., sector)
+        features["is_tech"] = 1 if symbol in ["AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA"] else 0
+        features["is_financial"] = 1 if symbol in ["JPM", "V", "BAC", "WFC", "GS"] else 0
+        features["is_index"] = 1 if symbol in ["SPY", "QQQ", "IWM", "DIA"] else 0
+        
+        # Fill any missing values
+        for key in features:
+            if pd.isna(features[key]):
+                features[key] = 0
+        
+        return features
     
     def _prepare_sentiment_features(self):
         """Prepare features for sentiment analysis model."""
@@ -1453,7 +1559,7 @@ class ModelTrainer:
                 learning_rate = hp.get("learning_rate", 0.001)
                 batch_size = hp.get("batch_size", 32)
                 hidden_dim = hp.get("hidden_dim", 128)
-                model = PatternRecognitionModel(lookback=lookback, hidden_dim=hidden_dim)
+                model = PatternRecognitionModel(lookback=lookback)
             else:
                 # Use default hyperparameters
                 learning_rate = 0.001
@@ -1598,8 +1704,6 @@ class ModelTrainer:
                 })
                 
                 # Update ensemble weights
-                xgb_weight = hp.get("xgb_weight",
-                                    # Update ensemble weights
                 xgb_weight = hp.get("xgb_weight", 0.4)
                 lgb_weight = hp.get("lgb_weight", 0.3)
                 cb_weight = hp.get("cb_weight", 0.3)
@@ -2120,22 +2224,24 @@ class ModelTrainer:
                         if symbol in self.data:
                             historical_data[symbol] = self.data[symbol]
                     
-                    # Analyze model performance
-                    lookback_days = 30
-                    performance = model.analyze_model_performance(historical_data, lookback_days)
-                    
-                    # Log performance metrics
-                    logger.info(f"Ranking model performance: " 
-                               f"Accuracy: {performance.get('accuracy', 0):.4f}, "
-                               f"Total predictions: {performance.get('total_predictions', 0)}")
-                    
-                    if self.use_mlflow:
-                        for metric_name, value in performance.items():
-                            if isinstance(value, (int, float)):
-                                mlflow.log_metric(f"performance_{metric_name}", value)
-                    
-                    # Update model metrics
-                    self.model_metrics["ranking"]["performance"] = performance
+                    # Analyze model performance if method exists
+                    if historical_data:
+                        lookback_days = 30
+                        if hasattr(model, 'analyze_model_performance'):
+                            performance = model.analyze_model_performance(historical_data, lookback_days)
+                            
+                            # Log performance metrics
+                            logger.info(f"Ranking model performance: " 
+                                      f"Accuracy: {performance.get('accuracy', 0):.4f}, "
+                                      f"Total predictions: {performance.get('total_predictions', 0)}")
+                            
+                            if self.use_mlflow:
+                                for metric_name, value in performance.items():
+                                    if isinstance(value, (int, float)):
+                                        mlflow.log_metric(f"performance_{metric_name}", value)
+                            
+                            # Update model metrics
+                            self.model_metrics["ranking"]["performance"] = performance
             
             # Generate feature importance visualization
             if hasattr(model, 'analyze_feature_importance'):
@@ -2258,7 +2364,7 @@ class ModelTrainer:
             
             accuracy = accuracy_score(true_labels, predictions)
             precision, recall, f1, _ = precision_recall_fscore_support(
-                true_labels, predictions, average='weighted'
+                true_labels, predictions, average='weighted', zero_division=0
             )
             cm = confusion_matrix(true_labels, predictions)
             
@@ -2780,6 +2886,7 @@ class ModelTrainer:
                 except:
                     pass
 
+
 # Command-line interface
 def parse_args():
     """Parse command-line arguments."""
@@ -2810,6 +2917,7 @@ def parse_args():
                        help="Mode (pipeline, optimize, train, evaluate)")
     
     return parser.parse_args()
+
 
 # Scheduled training function for off-hours training
 async def schedule_training():
@@ -2882,6 +2990,7 @@ async def schedule_training():
     except Exception as e:
         logger.error(f"Error in scheduled training: {e}")
         return False
+
 
 # Main function
 def main():
@@ -2980,10 +3089,12 @@ def main():
         logger.error(f"Unknown mode: {args.mode}")
         return 1
 
+
 # Entry point for scheduling
 async def run_scheduled_training():
     """Run scheduled training as a standalone task."""
     return await schedule_training()
+
 
 if __name__ == "__main__":
     # Run main function
