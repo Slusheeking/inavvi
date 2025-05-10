@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from pydantic import Field, validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 # Load environment variables from .env file
@@ -76,8 +76,9 @@ class TradingSettings(BaseSettings):
     watchlist_size: int = Field(20, env="WATCHLIST_SIZE")
     candidate_size: int = Field(5, env="CANDIDATE_SIZE")
 
-    @validator("trading_mode")
-    def trading_mode_must_be_valid(self, v):
+    @classmethod
+    @field_validator("trading_mode")
+    def trading_mode_must_be_valid(cls, v):
         if v not in ["paper", "live"]:
             raise ValueError("trading_mode must be either 'paper' or 'live'")
         return v
@@ -125,8 +126,9 @@ class LoggingSettings(BaseSettings):
     log_level: str = Field("INFO", env="LOG_LEVEL")
     log_dir: str = os.path.join(ROOT_DIR, "logs")
 
-    @validator("log_level")
-    def log_level_must_be_valid(self, v):
+    @classmethod
+    @field_validator("log_level")
+    def log_level_must_be_valid(cls, v):
         if v not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
             raise ValueError("log_level must be a valid Python logging level")
         return v
