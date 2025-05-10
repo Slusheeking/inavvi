@@ -18,12 +18,33 @@ sys.path.insert(0, os.path.abspath('.'))
 
 # Define known missing modules that might be imported
 MISSING_MODULES = {
+    'src.models': {
+        'is_package': True,
+        'submodules': ['ranking_model', 'pattern_recognition', 'exit_optimization', 'sentiment', 'prediction_model', 'risk_model']
+    },
     'src.models.ranking_model': {
         'classes': ['RankingModel'],
         'functions': ['rank_opportunities', 'get_model_weights']
     },
-    'src.models': {
-        'submodules': ['ranking_model', 'prediction_model', 'risk_model']
+    'src.models.pattern_recognition': {
+        'classes': ['PatternRecognitionModel'],
+        'variables': {'pattern_recognition_model': None},
+        'functions': ['detect_patterns', 'analyze_chart']
+    },
+    'src.models.exit_optimization': {
+        'classes': ['ExitOptimizationModel'],
+        'variables': {'exit_optimization_model': None},
+        'functions': ['optimize_exit', 'calculate_optimal_exit_price']
+    },
+    'src.models.sentiment': {
+        'is_package': True,
+        'classes': ['SentimentModel'],
+        'variables': {'sentiment_model': None},
+        'functions': ['analyze_sentiment', 'get_sentiment_score']
+    },
+    'src.core.screening': {
+        'variables': {'stock_screener': None},
+        'functions': ['screen_stocks', 'filter_opportunities']
     }
 }
 
@@ -55,41 +76,108 @@ def create_stub_modules():
     Create stub modules for missing dependencies.
     This creates empty modules that can be imported without error.
     """
-    for module_name, module_info in MISSING_MODULES.items():
+    # First, create parent modules to ensure proper hierarchy
+    for module_name in sorted(MISSING_MODULES.keys(), key=lambda x: len(x.split('.'))):
         if module_name in sys.modules:
             continue
             
-        # Create the module
-        module = types.ModuleType(module_name)
-        sys.modules[module_name] = module
+        # Create parent modules if they don't exist
+        parts = module_name.split('.')
+        for i in range(1, len(parts) + 1):
+            parent_name = '.'.join(parts[:i])
+            if parent_name not in sys.modules:
+                # Create the parent module
+                parent_module = types.ModuleType(parent_name)
+                # Add __path__ attribute if it's a package
+                if parent_name in MISSING_MODULES and MISSING_MODULES[parent_name].get('is_package', False):
+                    # Create the directory if it doesn't exist
+                    dir_path = os.path.join(*parent_name.split('.'))
+                    if not os.path.exists(dir_path):
+                        os.makedirs(dir_path, exist_ok=True)
+                    parent_module.__path__ = [dir_path]
+                    # Create __init__.py if it doesn't exist
+                    init_file = os.path.join(dir_path, '__init__.py')
+                    if not os.path.exists(init_file):
+                        with open(init_file, 'w') as f:
+                            f.write(f'# Auto-generated stub for {parent_name}\n')
+                
+                sys.modules[parent_name] = parent_module
+                
+                # Add to parent if not the root module
+                if i > 1:
+                    setattr(sys.modules['.'.join(parts[:i-1])], parts[i-1], parent_module)
+    
+    # Now populate modules with classes, functions, and variables
+    for module_name, module_info in MISSING_MODULES.items():
+        module = sys.modules[module_name]
         
         # Add classes to the module
         if 'classes' in module_info:
             for class_name in module_info['classes']:
-                # Create a simple class with common methods
-                class_def = type(class_name, (object,), {
-                    '__init__': lambda self, *args, **kwargs: None,
-                    '__str__': lambda self: f"<{class_name} stub>",
-                    '__repr__': lambda self: f"<{class_name} stub>"
-                })
+                # Create a class factory to handle dynamic class creation with proper names
+                def class_factory(name):
+                    return type(name, (object,), {
+                        '__init__': lambda self, *args, **kwargs: None,
+                        '__str__': lambda self: f"<{name} stub>",
+                        '__repr__': lambda self: f"<{name} stub>"
+                    })
+                
+                # Create the class with its proper name
+                class_def = class_factory(class_name)
                 setattr(module, class_name, class_def)
+                
+                # If the class name is the same as a variable name (lowercase), create an instance
+                if 'variables' in module_info and class_name.lower() in module_info['variables']:
+                    setattr(module, class_name.lower(), class_def())
         
         # Add functions to the module
         if 'functions' in module_info:
             for func_name in module_info['functions']:
-                # Create a simple function that returns None
-                setattr(module, func_name, lambda *args, **kwargs: None)
+                # Create a function factory to handle dynamic function creation
+                def func_factory(name):
+                    def stub_func(*args, **kwargs):
+                        return None
+                    stub_func.__name__ = name
+                    return stub_func
+                
+                # Create the function with its proper name
+                func = func_factory(func_name)
+                setattr(module, func_name, func)
+        
+        # Add variables to the module
+        if 'variables' in module_info:
+            for var_name, var_value in module_info['variables'].items():
+                # Skip if we already set this variable as an instance of a class
+                if hasattr(module, var_name):
+                    continue
+                setattr(module, var_name, var_value)
                 
         # Create submodules if needed
         if 'submodules' in module_info:
             for submodule_name in module_info['submodules']:
                 full_submodule_name = f"{module_name}.{submodule_name}"
                 if full_submodule_name not in sys.modules:
+                    # Check if the submodule should be a package
+                    is_package = (full_submodule_name in MISSING_MODULES and
+                                 MISSING_MODULES[full_submodule_name].get('is_package', False))
+                    
                     submod = types.ModuleType(full_submodule_name)
+                    if is_package:
+                        dir_path = os.path.join(*full_submodule_name.split('.'))
+                        if not os.path.exists(dir_path):
+                            os.makedirs(dir_path, exist_ok=True)
+                        submod.__path__ = [dir_path]
+                        
+                        # Create __init__.py
+                        init_file = os.path.join(dir_path, '__init__.py')
+                        if not os.path.exists(init_file):
+                            with open(init_file, 'w') as f:
+                                f.write(f'# Auto-generated stub for {full_submodule_name}\n')
+                    
                     sys.modules[full_submodule_name] = submod
                     setattr(module, submodule_name, submod)
         
-        print(f"Created stub module for {module_name}")
+        print(f"Created or updated stub module for {module_name}")
 
 
 def import_and_execute_file(file_path: str) -> Tuple[bool, str]:
@@ -149,32 +237,88 @@ def import_and_execute_file(file_path: str) -> Tuple[bool, str]:
         
         try:
             spec.loader.exec_module(module)
-        except ModuleNotFoundError as e:
-            missing_module = str(e).split("'")[1]
-            
-            # Check if this is one of our known missing modules
-            if any(missing_module.startswith(m) for m in MISSING_MODULES.keys()):
-                # Create the module on-the-fly
-                parent_modules = missing_module.split('.')
-                current = ""
-                for i, part in enumerate(parent_modules):
-                    if current:
-                        current = f"{current}.{part}"
-                    else:
-                        current = part
-                        
-                    if current not in sys.modules:
-                        parent_mod = types.ModuleType(current)
-                        sys.modules[current] = parent_mod
-                        
-                        # If there's a parent, add this as attribute to parent
-                        if i > 0:
-                            parent_name = '.'.join(parent_modules[:i])
-                            setattr(sys.modules[parent_name], part, parent_mod)
+        except (ModuleNotFoundError, ImportError) as e:
+            # Extract the missing module name from the error message
+            error_msg = str(e)
+            if "No module named" in error_msg:
+                # Extract module name from error message
+                missing_module = error_msg.split("'")[1]
                 
-                # Try again now that the module exists
-                spec.loader.exec_module(module)
-                return True, f"Successfully imported {file_path} (with stub modules)"
+                # Check if this is a known module or can be derived from known modules
+                known_missing = False
+                for known_module in MISSING_MODULES.keys():
+                    if missing_module == known_module or missing_module.startswith(f"{known_module}."):
+                        known_missing = True
+                        break
+                
+                if known_missing:
+                    # Create all parent modules
+                    parts = missing_module.split('.')
+                    for i in range(1, len(parts) + 1):
+                        parent_name = '.'.join(parts[:i])
+                        if parent_name not in sys.modules:
+                            parent_mod = types.ModuleType(parent_name)
+                            # If this might be a package (has submodules)
+                            if i < len(parts):
+                                dir_path = os.path.join(*parent_name.split('.'))
+                                if not os.path.exists(dir_path):
+                                    os.makedirs(dir_path, exist_ok=True)
+                                parent_mod.__path__ = [dir_path]
+                            
+                            sys.modules[parent_name] = parent_mod
+                            
+                            # Add as attribute to parent if not root
+                            if i > 1:
+                                setattr(sys.modules['.'.join(parts[:i-1])], parts[i-1], parent_mod)
+                    
+                    # Try again now that the module exists
+                    try:
+                        spec.loader.exec_module(module)
+                        return True, f"Successfully imported {file_path} (with dynamic stub modules)"
+                    except Exception as inner_e:
+                        return False, f"Error while importing {file_path} after stub creation: {str(inner_e)}"
+                else:
+                    return False, f"Error while importing {file_path}: {str(e)}"
+            # Handle "cannot import name" errors
+            elif "cannot import name" in error_msg:
+                # Extract the missing name and module
+                parts = error_msg.split("'")
+                if len(parts) >= 3:
+                    missing_name = parts[1]
+                    from_module = parts[3] if len(parts) >= 5 else None
+                    
+                    if from_module and from_module in sys.modules:
+                        # Create the missing attribute
+                        if '.' in missing_name or missing_name.isupper():
+                            # Likely a constant or qualified name
+                            setattr(sys.modules[from_module], missing_name, None)
+                        elif missing_name[0].isupper():
+                            # Likely a class
+                            class_def = type(missing_name, (object,), {
+                                '__init__': lambda self, *args, **kwargs: None,
+                                '__str__': lambda self: f"<{missing_name} stub>",
+                                '__repr__': lambda self: f"<{missing_name} stub>"
+                            })
+                            setattr(sys.modules[from_module], missing_name, class_def)
+                            # Also create an instance if the lowercase version is a common pattern
+                            if missing_name.lower() == missing_name.lower().strip('_'):
+                                setattr(sys.modules[from_module], missing_name.lower(), class_def())
+                        else:
+                            # Likely a function or variable
+                            # Create a function that returns None
+                            def stub_func(*args, **kwargs):
+                                return None
+                            stub_func.__name__ = missing_name
+                            setattr(sys.modules[from_module], missing_name, stub_func)
+                        
+                        # Try again
+                        try:
+                            spec.loader.exec_module(module)
+                            return True, f"Successfully imported {file_path} (with dynamic stub attribute: {missing_name})"
+                        except Exception as inner_e:
+                            return False, f"Error while importing {file_path} after adding stub attribute: {str(inner_e)}"
+                
+                return False, f"Error while importing {file_path}: {str(e)}"
             else:
                 return False, f"Error while importing {file_path}: {str(e)}"
         
@@ -189,14 +333,21 @@ def main():
     global types
     import types
     
-    # Create directory for src/models if it doesn't exist
-    models_dir = Path('src/models')
-    if not models_dir.exists():
-        models_dir.mkdir(parents=True, exist_ok=True)
-        # Create an __init__.py file to make it a proper package
-        with open(models_dir / '__init__.py', 'w') as f:
-            f.write('# Generated by run_all_imports.py\n')
-        print(f"Created directory: {models_dir}")
+    # Create directories for all model modules
+    for module_name, module_info in MISSING_MODULES.items():
+        # Only handle actual module paths, not attributes
+        if '.' in module_name:
+            dir_path = os.path.join(*module_name.split('.'))
+            # Skip if it's not a package or doesn't need a directory
+            if not module_info.get('is_package', False) and 'submodules' not in module_info:
+                continue
+                
+            if not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+                # Create an __init__.py file to make it a proper package
+                with open(os.path.join(dir_path, '__init__.py'), 'w') as f:
+                    f.write(f'# Generated by run_all_imports.py for {module_name}\n')
+                print(f"Created directory: {dir_path}")
     
     # Create stub modules before importing any files
     create_stub_modules()
