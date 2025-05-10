@@ -6,38 +6,81 @@ Performs: git status, git add, git commit with timestamp, and git push.
 
 import datetime
 import subprocess
+import sys
 
 
 def run_command(command):
     """Run a shell command and return the output."""
     print(f"Executing: {command}")
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    
+    # Use list form for better compatibility with VSCode
+    if isinstance(command, str):
+        import shlex
+        command_list = shlex.split(command)
+    else:
+        command_list = command
+    
+    try:
+        # Use subprocess.Popen for better compatibility with VSCode
+        process = subprocess.Popen(
+            command_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            universal_newlines=True
+        )
+        
+        stdout, stderr = process.communicate()
+        
+        if stdout:
+            print(f"Output:\n{stdout}")
+            
+        if stderr and process.returncode != 0:
+            print(f"Error:\n{stderr}")
+            raise Exception(f"Command failed with exit code {process.returncode}")
+            
+        return stdout
+    except FileNotFoundError:
+        print(f"Error: Command not found: {command_list[0]}")
+        raise
+    except Exception as e:
+        print(f"Error executing command: {e}")
+        raise
 
-    if result.stdout:
-        print(f"Output:\n{result.stdout}")
 
-    if result.stderr and result.returncode != 0:
-        print(f"Error:\n{result.stderr}")
-        raise Exception(f"Command failed with exit code {result.returncode}")
-
-    return result.stdout
+def get_current_branch():
+    """Get the name of the current git branch."""
+    try:
+        branch = run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+        return branch
+    except Exception:
+        # Default to main if we can't determine the branch
+        print("Warning: Could not determine current branch, defaulting to 'main'")
+        return "main"
 
 
 def main():
     """Main function to execute git commands."""
     try:
+        # Check if git is installed
+        try:
+            run_command(["git", "--version"])
+        except Exception:
+            print("Error: Git is not installed or not in the PATH")
+            return 1
+
         # Get current git status
         print("\n--- Checking Git Status ---")
-        status_output = run_command("git status")
+        status_output = run_command(["git", "status"])
 
         # Check if there are changes to commit
         if "nothing to commit, working tree clean" in status_output:
             print("No changes to commit. Exiting.")
-            return
+            return 0
 
         # Add all changes
         print("\n--- Adding All Changes ---")
-        run_command("git add .")
+        run_command(["git", "add", "."])
 
         # Create commit message with timestamp
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -45,14 +88,20 @@ def main():
 
         # Commit changes
         print(f"\n--- Committing Changes with message: '{commit_message}' ---")
-        run_command(f'git commit -m "{commit_message}"')
+        run_command(["git", "commit", "-m", commit_message])
 
+        # Get current branch
+        current_branch = get_current_branch()
+        
         # Push changes
-        print("\n--- Pushing to Remote Repository ---")
-        run_command("git push origin main")  # Ensure to push to the correct branch
+        print(f"\n--- Pushing to Remote Repository (branch: {current_branch}) ---")
+        run_command(["git", "push", "origin", current_branch])
 
         print("\n--- Git Operations Completed Successfully ---")
 
+    except subprocess.CalledProcessError as e:
+        print(f"\nGit command failed: {e}")
+        return 1
     except Exception as e:
         print(f"\nError occurred: {e}")
         return 1
@@ -61,4 +110,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

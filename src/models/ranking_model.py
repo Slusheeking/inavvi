@@ -20,6 +20,16 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
+# Import RAPIDS libraries if available
+try:
+    import cudf
+    import cupy as cp
+    from cuml.ensemble import RandomForestClassifier as cuRF
+    from cuml.preprocessing import StandardScaler as cuStandardScaler
+    RAPIDS_AVAILABLE = True
+except ImportError:
+    RAPIDS_AVAILABLE = False
+
 import catboost as cb
 import lightgbm as lgb
 import optuna
@@ -30,6 +40,14 @@ from src.utils.redis_client import redis_client
 
 # Set up logger
 logger = setup_logger("ranking_model")
+
+# Enable RAPIDS acceleration for pandas operations where possible
+if RAPIDS_AVAILABLE:
+    try:
+        cudf.pandas_accelerator()
+        logger.info("RAPIDS pandas accelerator enabled for ranking_model")
+    except Exception as e:
+        logger.warning(f"Could not enable RAPIDS pandas accelerator: {e}")
 
 
 class RankingModel:
@@ -420,6 +438,7 @@ class RankingModel:
         n_trials: int = 30,
         use_time_series_cv: bool = True,
         test_size: float = 0.2,
+        use_gpu: bool = True,
     ) -> bool:
         """
         Train the ranking model ensemble.
@@ -442,12 +461,504 @@ class RankingModel:
             if target_col not in training_data.columns:
                 logger.error(f"Target column '{target_col}' not found in training data")
                 return False
+                
             logger.info(f"Training ranking model on {len(training_data)} samples")
             non_feature_cols = [target_col]
             if "symbol" in training_data.columns:
                 non_feature_cols.append("symbol")
             if "date" in training_data.columns:
                 non_feature_cols.append("date")
+                
+            # Check if we can use GPU acceleration
+            use_rapids = use_gpu and RAPIDS_AVAILABLE
+            if use_rapids:
+                logger.info("Using RAPIDS GPU acceleration for model training")
+                return self._train_with_rapids(
+                    training_data, 
+                    non_feature_cols, 
+                    target_col, 
+                    optimize_hyperparams, 
+                    n_trials, 
+                    use_time_series_cv, 
+                    test_size
+                )
+            else:
+                logger.info("Using CPU for model training")
+                return self._train_with_cpu(
+                    training_data, 
+                    non_feature_cols, 
+                    target_col, 
+                    optimize_hyperparams, 
+                    n_trials, 
+                    use_time_series_cv, 
+                    test_size
+                )
+                
+    def _train_with_rapids(
+        self,
+        training_data: pd.DataFrame,
+        non_feature_cols: List[str],
+        target_col: str,
+        optimize_hyperparams: bool,
+        n_trials: int,
+        use_time_series_cv: bool,
+        test_size: float,
+    ) -> bool:
+        """Train the model using RAPIDS GPU acceleration."""
+        try:
+            # Convert to cuDF for GPU acceleration
+        except Exception as e:
+            logger.error(f"Error training model with RAPIDS: {e}")
+            return False
+            X = training_data.drop(columns=non_feature_cols)
+            y = training_data[target_col]
+            self.feature_names = X.columns.tolist()
+            
+            # Use cuML's StandardScaler
+            gpu_scaler = cuStandardScaler()
+            X_gpu = cudf.DataFrame.from_pandas(X)
+            y_gpu = cudf.Series(y.values)
+            
+            X_scaled_gpu = gpu_scaler.fit_transform(X_gpu)
+            
+            # Save the CPU version of the scaler for inference
+            self.scaler = StandardScaler()
+            self.scaler.fit(X)
+            
+            # Split data
+            if use_time_series_cv and "date" in training_data.columns:
+                sorted_indices = training_data["date"].argsort()
+                X_sorted = X_scaled_gpu.iloc[sorted_indices]
+                y_sorted = y_gpu.iloc[sorted_indices]
+                val_size = int(len(X_sorted) * test_size)
+                train_size = len(X_sorted) - val_size
+                X_train = X_sorted[:train_size]
+                y_train = y_sorted[:train_size]
+                X_val = X_sorted[train_size:]
+                y_val = y_sorted[train_size:]
+                logger.info(f"Using time-series split: {train_size} train, {val_size} validation")
+            else:
+                # Use cuML's train_test_split
+                from cuml.model_selection import train_test_split as cu_train_test_split
+                X_train, X_val, y_train, y_val = cu_train_test_split(
+                    X_scaled_gpu, y_gpu, test_size=test_size, random_state=42
+                )
+                logger.info(f"Using random split: {len(X_train)} train, {len(X_val)} validation")
+            
+            self.model_metrics = {}
+            
+            # Train XGBoost with GPU acceleration
+            logger.info("Training XGBoost model with GPU acceleration...")
+            if optimize_hyperparams:
+                logger.info("Optimizing XGBoost hyperparameters...")
+                # Update hyperparams to use GPU
+                self.hyperparams["xgboost"]["tree_method"] = "gpu_hist"
+                self.hyperparams["xgboost"]["device"] = "cuda"
+                self.optimize_hyperparameters(
+                    X_train.to_pandas().values, 
+                    y_train.to_pandas().values, 
+                    X_val.to_pandas().values, 
+                    y_val.to_pandas().values, 
+                    "xgboost", 
+                    n_trials
+                )
+            
+            # Convert to DMatrix for XGBoost
+            dtrain = xgb.DMatrix(X_train.to_pandas(), label=y_train.to_pandas(), feature_names=self.feature_names)
+            dval = xgb.DMatrix(X_val.to_pandas(), label=y_val.to_pandas(), feature_names=self.feature_names)
+            
+            # Update params for GPU
+            xgb_params = self.hyperparams["xgboost"].copy()
+            xgb_params["tree_method"] = "gpu_hist"
+            xgb_params["device"] = "cuda"
+            
+            self.models["xgboost"] = xgb.train(
+                xgb_params,
+                dtrain,
+                num_boost_round=100,
+                evals=[(dtrain, "train"), (dval, "val")],
+                early_stopping_rounds=10,
+                verbose_eval=False,
+            )
+            
+            xgb_importance = self.models["xgboost"].get_score(importance_type="gain")
+            total = sum(xgb_importance.values()) or 1.0
+            self.feature_importance["xgboost"] = {k: v / total for k, v in xgb_importance.items()}
+            
+            xgb_pred = self.models["xgboost"].predict(dval)
+            xgb_pred_binary = (xgb_pred > 0.5).astype(int)
+            y_val_np = y_val.to_pandas().values
+            
+            self.model_metrics["xgboost"] = {
+                "accuracy": accuracy_score(y_val_np, xgb_pred_binary),
+                "precision": precision_score(y_val_np, xgb_pred_binary, zero_division=0),
+                "recall": recall_score(y_val_np, xgb_pred_binary, zero_division=0),
+                "f1": f1_score(y_val_np, xgb_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val_np, xgb_pred),
+            }
+            
+            # Train LightGBM with GPU acceleration
+            logger.info("Training LightGBM model with GPU acceleration...")
+            if optimize_hyperparams:
+                logger.info("Optimizing LightGBM hyperparameters...")
+                # Update hyperparams to use GPU
+                self.hyperparams["lightgbm"]["device"] = "gpu"
+                self.optimize_hyperparameters(
+                    X_train.to_pandas().values, 
+                    y_train.to_pandas().values, 
+                    X_val.to_pandas().values, 
+                    y_val.to_pandas().values, 
+                    "lightgbm", 
+                    n_trials
+                )
+            
+            # Convert to Dataset for LightGBM
+            train_data = lgb.Dataset(X_train.to_pandas(), label=y_train.to_pandas(), feature_name=self.feature_names)
+            val_data = lgb.Dataset(X_val.to_pandas(), label=y_val.to_pandas(), reference=train_data)
+            
+            # Update params for GPU
+            lgb_params = self.hyperparams["lightgbm"].copy()
+            lgb_params["device"] = "gpu"
+            
+            self.models["lightgbm"] = lgb.train(
+                lgb_params,
+                train_data,
+                num_boost_round=100,
+                valid_sets=[train_data, val_data],
+                valid_names=["train", "valid"],
+                callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)],
+            )
+            
+            lgb_importance = dict(zip(self.feature_names, self.models["lightgbm"].feature_importance(importance_type="gain")))
+            total = sum(lgb_importance.values()) or 1.0
+            self.feature_importance["lightgbm"] = {k: v / total for k, v in lgb_importance.items()}
+            
+            lgb_pred = self.models["lightgbm"].predict(X_val.to_pandas())
+            lgb_pred_binary = (lgb_pred > 0.5).astype(int)
+            
+            self.model_metrics["lightgbm"] = {
+                "accuracy": accuracy_score(y_val_np, lgb_pred_binary),
+                "precision": precision_score(y_val_np, lgb_pred_binary, zero_division=0),
+                "recall": recall_score(y_val_np, lgb_pred_binary, zero_division=0),
+                "f1": f1_score(y_val_np, lgb_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val_np, lgb_pred),
+            }
+            
+            # Train CatBoost with GPU acceleration
+            logger.info("Training CatBoost model with GPU acceleration...")
+            if optimize_hyperparams:
+                logger.info("Optimizing CatBoost hyperparameters...")
+                # Update hyperparams to use GPU
+                self.hyperparams["catboost"]["task_type"] = "GPU"
+                self.optimize_hyperparameters(
+                    X_train.to_pandas().values, 
+                    y_train.to_pandas().values, 
+                    X_val.to_pandas().values, 
+                    y_val.to_pandas().values, 
+                    "catboost", 
+                    n_trials
+                )
+            
+            # Convert to Pool for CatBoost
+            train_data = cb.Pool(X_train.to_pandas(), label=y_train.to_pandas())
+            val_data = cb.Pool(X_val.to_pandas(), label=y_val.to_pandas())
+            
+            # Update params for GPU
+            cb_params = self.hyperparams["catboost"].copy()
+            cb_params["task_type"] = "GPU"
+            
+            self.models["catboost"] = cb.CatBoost(cb_params)
+            self.models["catboost"].fit(train_data, eval_set=val_data, early_stopping_rounds=10, verbose=False)
+            
+            cb_importance = dict(zip(self.feature_names, self.models["catboost"].get_feature_importance()))
+            total = sum(cb_importance.values()) or 1.0
+            self.feature_importance["catboost"] = {k: v / total for k, v in cb_importance.items()}
+            
+            cb_pred = self.models["catboost"].predict(X_val.to_pandas(), prediction_type="Probability")[:, 1]
+            cb_pred_binary = (cb_pred > 0.5).astype(int)
+            
+            self.model_metrics["catboost"] = {
+                "accuracy": accuracy_score(y_val_np, cb_pred_binary),
+                "precision": precision_score(y_val_np, cb_pred_binary, zero_division=0),
+                "recall": recall_score(y_val_np, cb_pred_binary, zero_division=0),
+                "f1": f1_score(y_val_np, cb_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val_np, cb_pred),
+            }
+            
+            # Train RandomForest with cuML
+            logger.info("Training RandomForest model with cuML...")
+            rf_params = self.hyperparams["randomforest"].copy()
+            
+            # Create and train cuML RandomForest
+            rf_model = cuRF(
+                n_estimators=rf_params["n_estimators"],
+                max_depth=rf_params["max_depth"],
+                max_features=0.8,  # cuML specific parameter
+                n_bins=256,        # cuML specific parameter for faster training
+                random_state=rf_params["random_state"],
+            )
+            
+            rf_model.fit(X_train, y_train)
+            
+            # Save the model
+            self.models["randomforest"] = rf_model
+            
+            # Get feature importances
+            rf_importance = dict(zip(self.feature_names, rf_model.feature_importances_))
+            total = sum(rf_importance.values()) or 1.0
+            self.feature_importance["randomforest"] = {k: v / total for k, v in rf_importance.items()}
+            
+            # Get predictions
+            rf_pred_proba = rf_model.predict_proba(X_val)
+            rf_pred = rf_pred_proba[:, 1]
+            rf_pred_binary = (rf_pred > 0.5).astype(int)
+            
+            self.model_metrics["randomforest"] = {
+                "accuracy": accuracy_score(y_val_np, rf_pred_binary),
+                "precision": precision_score(y_val_np, rf_pred_binary, zero_division=0),
+                "recall": recall_score(y_val_np, rf_pred_binary, zero_division=0),
+                "f1": f1_score(y_val_np, rf_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val_np, rf_pred),
+            }
+            
+            # Combine feature importance and calculate correlations
+            self._combine_feature_importance()
+            self._calculate_feature_correlations(X)
+            self.last_trained = datetime.now().isoformat()
+            
+            # Get ensemble predictions
+            X_val_np = X_val.to_pandas().values
+            ensemble_pred = self._ensemble_predict(X_val_np)
+            ensemble_pred_binary = (ensemble_pred > 0.5).astype(int)
+            
+            self.model_metrics["ensemble"] = {
+                "accuracy": accuracy_score(y_val_np, ensemble_pred_binary),
+                "precision": precision_score(y_val_np, ensemble_pred_binary, zero_division=0),
+                "recall": recall_score(y_val_np, ensemble_pred_binary, zero_division=0),
+                "f1": f1_score(y_val_np, ensemble_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val_np, ensemble_pred),
+            }
+            
+            # Optimize ensemble weights
+            self._optimize_ensemble_weights(X_val_np, y_val_np)
+            
+            # Save the model
+            self.save_model()
+            
+            logger.info("Model training completed with:")
+            for model_name, metrics in self.model_metrics.items():
+                metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+                logger.info(f"  {model_name}: {metrics_str}")
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error training model with RAPIDS: {e}")
+            logger.info("Falling back to CPU training")
+            return self._train_with_cpu(
+                training_data, 
+                non_feature_cols, 
+                target_col, 
+                optimize_hyperparams, 
+                n_trials, 
+                use_time_series_cv, 
+                test_size
+            )
+    
+    def _train_with_cpu(
+        self,
+        training_data: pd.DataFrame,
+        non_feature_cols: List[str],
+        target_col: str,
+        optimize_hyperparams: bool,
+        n_trials: int,
+        use_time_series_cv: bool,
+        test_size: float,
+    ) -> bool:
+        """Train the model using CPU."""
+        try:
+            X = training_data.drop(columns=non_feature_cols)
+            y = training_data[target_col]
+            self.feature_names = X.columns.tolist()
+            X_scaled = self.scaler.fit_transform(X)
+            
+            if use_time_series_cv and "date" in training_data.columns:
+                sorted_indices = training_data["date"].argsort()
+                X_sorted = X_scaled[sorted_indices]
+                y_sorted = y.iloc[sorted_indices].values
+                val_size = int(len(X_sorted) * test_size)
+                train_size = len(X_sorted) - val_size
+                X_train = X_sorted[:train_size]
+                y_train = y_sorted[:train_size]
+                X_val = X_sorted[train_size:]
+                y_val = y_sorted[train_size:]
+                logger.info(f"Using time-series split: {train_size} train, {val_size} validation")
+            else:
+                X_train, X_val, y_train, y_val = train_test_split(X_scaled, y, test_size=test_size, random_state=42)
+                logger.info(f"Using random split: {len(X_train)} train, {len(X_val)} validation")
+                
+            self.model_metrics = {}
+            
+            # Train XGBoost
+            logger.info("Training XGBoost model...")
+            if optimize_hyperparams:
+                logger.info("Optimizing XGBoost hyperparameters...")
+                self.optimize_hyperparameters(X_train, y_train, X_val, y_val, "xgboost", n_trials)
+                
+            dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=self.feature_names)
+            dval = xgb.DMatrix(X_val, label=y_val, feature_names=self.feature_names)
+            
+            self.models["xgboost"] = xgb.train(
+                self.hyperparams["xgboost"],
+                dtrain,
+                num_boost_round=100,
+                evals=[(dtrain, "train"), (dval, "val")],
+                early_stopping_rounds=10,
+                verbose_eval=False,
+            )
+            
+            xgb_importance = self.models["xgboost"].get_score(importance_type="gain")
+            total = sum(xgb_importance.values()) or 1.0
+            self.feature_importance["xgboost"] = {k: v / total for k, v in xgb_importance.items()}
+            
+            xgb_pred = self.models["xgboost"].predict(dval)
+            xgb_pred_binary = (xgb_pred > 0.5).astype(int)
+            
+            self.model_metrics["xgboost"] = {
+                "accuracy": accuracy_score(y_val, xgb_pred_binary),
+                "precision": precision_score(y_val, xgb_pred_binary, zero_division=0),
+                "recall": recall_score(y_val, xgb_pred_binary, zero_division=0),
+                "f1": f1_score(y_val, xgb_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val, xgb_pred),
+            }
+            
+            # Train LightGBM
+            logger.info("Training LightGBM model...")
+            if optimize_hyperparams:
+                logger.info("Optimizing LightGBM hyperparameters...")
+                self.optimize_hyperparameters(X_train, y_train, X_val, y_val, "lightgbm", n_trials)
+                
+            train_data = lgb.Dataset(X_train, label=y_train, feature_name=self.feature_names)
+            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+            
+            self.models["lightgbm"] = lgb.train(
+                self.hyperparams["lightgbm"],
+                train_data,
+                num_boost_round=100,
+                valid_sets=[train_data, val_data],
+                valid_names=["train", "valid"],
+                callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)],
+            )
+            
+            lgb_importance = dict(zip(self.feature_names, self.models["lightgbm"].feature_importance(importance_type="gain")))
+            total = sum(lgb_importance.values()) or 1.0
+            self.feature_importance["lightgbm"] = {k: v / total for k, v in lgb_importance.items()}
+            
+            lgb_pred = self.models["lightgbm"].predict(X_val)
+            lgb_pred_binary = (lgb_pred > 0.5).astype(int)
+            
+            self.model_metrics["lightgbm"] = {
+                "accuracy": accuracy_score(y_val, lgb_pred_binary),
+                "precision": precision_score(y_val, lgb_pred_binary, zero_division=0),
+                "recall": recall_score(y_val, lgb_pred_binary, zero_division=0),
+                "f1": f1_score(y_val, lgb_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val, lgb_pred),
+            }
+            
+            # Train CatBoost
+            logger.info("Training CatBoost model...")
+            if optimize_hyperparams:
+                logger.info("Optimizing CatBoost hyperparameters...")
+                self.optimize_hyperparameters(X_train, y_train, X_val, y_val, "catboost", n_trials)
+                
+            train_data = cb.Pool(X_train, label=y_train)
+            val_data = cb.Pool(X_val, label=y_val)
+            
+            self.models["catboost"] = cb.CatBoost(self.hyperparams["catboost"])
+            self.models["catboost"].fit(train_data, eval_set=val_data, early_stopping_rounds=10, verbose=False)
+            
+            cb_importance = dict(zip(self.feature_names, self.models["catboost"].get_feature_importance()))
+            total = sum(cb_importance.values()) or 1.0
+            self.feature_importance["catboost"] = {k: v / total for k, v in cb_importance.items()}
+            
+            cb_pred = self.models["catboost"].predict(X_val, prediction_type="Probability")[:, 1]
+            cb_pred_binary = (cb_pred > 0.5).astype(int)
+            
+            self.model_metrics["catboost"] = {
+                "accuracy": accuracy_score(y_val, cb_pred_binary),
+                "precision": precision_score(y_val, cb_pred_binary, zero_division=0),
+                "recall": recall_score(y_val, cb_pred_binary, zero_division=0),
+                "f1": f1_score(y_val, cb_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val, cb_pred),
+            }
+            
+            # Train RandomForest with scikit-learn
+            logger.info("Training RandomForest model with scikit-learn...")
+            rf_params = self.hyperparams["randomforest"].copy()
+            
+            rf_model = RandomForestClassifier(
+                n_estimators=rf_params["n_estimators"],
+                max_depth=rf_params["max_depth"],
+                min_samples_split=rf_params["min_samples_split"],
+                min_samples_leaf=rf_params["min_samples_leaf"],
+                random_state=rf_params["random_state"],
+            )
+            
+            rf_model.fit(X_train, y_train)
+            
+            # Save the model
+            self.models["randomforest"] = rf_model
+            
+            # Get feature importances
+            rf_importance = dict(zip(self.feature_names, rf_model.feature_importances_))
+            total = sum(rf_importance.values()) or 1.0
+            self.feature_importance["randomforest"] = {k: v / total for k, v in rf_importance.items()}
+            
+            # Get predictions
+            rf_pred = rf_model.predict_proba(X_val)[:, 1]
+            rf_pred_binary = (rf_pred > 0.5).astype(int)
+            
+            self.model_metrics["randomforest"] = {
+                "accuracy": accuracy_score(y_val, rf_pred_binary),
+                "precision": precision_score(y_val, rf_pred_binary, zero_division=0),
+                "recall": recall_score(y_val, rf_pred_binary, zero_division=0),
+                "f1": f1_score(y_val, rf_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val, rf_pred),
+            }
+            
+            # Combine feature importance and calculate correlations
+            self._combine_feature_importance()
+            self._calculate_feature_correlations(X)
+            self.last_trained = datetime.now().isoformat()
+            
+            # Get ensemble predictions
+            ensemble_pred = self._ensemble_predict(X_val)
+            ensemble_pred_binary = (ensemble_pred > 0.5).astype(int)
+            
+            self.model_metrics["ensemble"] = {
+                "accuracy": accuracy_score(y_val, ensemble_pred_binary),
+                "precision": precision_score(y_val, ensemble_pred_binary, zero_division=0),
+                "recall": recall_score(y_val, ensemble_pred_binary, zero_division=0),
+                "f1": f1_score(y_val, ensemble_pred_binary, zero_division=0),
+                "auc": roc_auc_score(y_val, ensemble_pred),
+            }
+            
+            # Optimize ensemble weights
+            self._optimize_ensemble_weights(X_val, y_val)
+            
+            # Save the model
+            self.save_model()
+            
+            logger.info("Model training completed with:")
+            for model_name, metrics in self.model_metrics.items():
+                metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+                logger.info(f"  {model_name}: {metrics_str}")
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error training model with CPU: {e}")
+            return False
             X = training_data.drop(columns=non_feature_cols)
             y = training_data[target_col]
             self.feature_names = X.columns.tolist()

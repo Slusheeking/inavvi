@@ -6,6 +6,7 @@ This module provides functionality for fetching financial data:
 - Financial news data from various sources
 - Market data for sentiment analysis and other models
 - Data persistence in Redis and TimescaleDB
+- GPU acceleration with RAPIDS when available
 """
 
 import os
@@ -23,6 +24,21 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Dict, List, Union, Any, Optional, Tuple
 from dotenv import load_dotenv
+
+# Try to import RAPIDS libraries for GPU acceleration
+try:
+    import cudf
+    import cupy as cp
+    from cuml.preprocessing import StandardScaler as CuStandardScaler
+    RAPIDS_AVAILABLE = True
+    # Enable pandas accelerator if available
+    try:
+        cudf.pandas_accelerator()
+        logging.info("RAPIDS pandas accelerator enabled for data_fetcher")
+    except Exception as e:
+        logging.warning(f"Could not enable RAPIDS pandas accelerator: {e}")
+except ImportError:
+    RAPIDS_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -58,6 +74,7 @@ class DataFetcher:
     - Obtains financial news data
     - Cleans and structures data for model training
     - Caches data in Redis for faster access
+    - GPU acceleration with RAPIDS when available
     """
     
     def __init__(
@@ -66,7 +83,8 @@ class DataFetcher:
         use_polygon: bool = True,
         use_alpha_vantage: bool = True,
         use_redis_cache: bool = True,
-        data_dir: str = None
+        data_dir: str = None,
+        use_gpu: bool = True
     ):
         """
         Initialize the data fetcher.
@@ -83,6 +101,7 @@ class DataFetcher:
         self.use_polygon = use_polygon
         self.use_alpha_vantage = use_alpha_vantage
         self.use_redis_cache = use_redis_cache
+        self.use_gpu = use_gpu and RAPIDS_AVAILABLE
         
         # API Keys
         self.polygon_api_key = os.getenv("POLYGON_API_KEY")
@@ -117,6 +136,7 @@ class DataFetcher:
         
         logger.info(f"DataFetcher initialized with {data_days} days of historical data")
         logger.info(f"Data sources: Polygon={self.use_polygon}, Alpha Vantage={self.use_alpha_vantage}")
+        logger.info(f"GPU acceleration: {'Enabled' if self.use_gpu else 'Disabled'}")
 
     def get_universe(self, size: int = 300) -> List[str]:
         """
@@ -209,7 +229,7 @@ class DataFetcher:
             logger.error(f"Error fetching S&P 500 symbols from Polygon: {e}")
             return []
 
-    def fetch_historical_data(self, symbols: List[str] = None, timeframe: str = "1d") -> Dict[str, pd.DataFrame]:
+    def fetch_historical_data(self, symbols: List[str] = None, timeframe: str = "1d") -> Dict[str, Union[pd.DataFrame, 'cudf.DataFrame']]:
         """
         Fetch historical price data for multiple symbols.
         
@@ -268,6 +288,26 @@ class DataFetcher:
         if self.use_redis_cache:
             self._cache_data_in_redis(results, timeframe)
         
+        # Convert to GPU DataFrames if using GPU
+        if self.use_gpu and RAPIDS_AVAILABLE:
+            try:
+                gpu_results = {}
+                for symbol, df in results.items():
+                    try:
+                        # Convert to cuDF DataFrame
+                        gpu_df = cudf.DataFrame.from_pandas(df)
+                        gpu_results[symbol] = gpu_df
+                    except Exception as e:
+                        logger.warning(f"Error converting {symbol} to GPU DataFrame: {e}")
+                        gpu_results[symbol] = df  # Keep original pandas DataFrame
+                
+                # Replace results with GPU DataFrames
+                results = gpu_results
+                logger.info(f"Converted {len(results)} symbols to GPU DataFrames")
+            except Exception as e:
+                logger.error(f"Error using GPU acceleration: {e}")
+                logger.info("Falling back to CPU processing")
+        
         # Store the data
         self.price_data = results
         
@@ -275,7 +315,7 @@ class DataFetcher:
         
         return results
 
-    def _get_cached_data(self, symbols: List[str], timeframe: str) -> Dict[str, pd.DataFrame]:
+    def _get_cached_data(self, symbols: List[str], timeframe: str) -> Dict[str, Union[pd.DataFrame, 'cudf.DataFrame']]:
         """
         Get cached data from Redis.
         
@@ -298,9 +338,28 @@ class DataFetcher:
             if df is not None and not df.empty:
                 cached_data[symbol] = df
         
+        # Convert to GPU DataFrames if using GPU
+        if self.use_gpu and RAPIDS_AVAILABLE and cached_data:
+            try:
+                gpu_cached_data = {}
+                for symbol, df in cached_data.items():
+                    try:
+                        # Convert to cuDF DataFrame
+                        gpu_df = cudf.DataFrame.from_pandas(df)
+                        gpu_cached_data[symbol] = gpu_df
+                    except Exception as e:
+                        logger.warning(f"Error converting cached {symbol} to GPU DataFrame: {e}")
+                        gpu_cached_data[symbol] = df  # Keep original pandas DataFrame
+                
+                # Replace cached_data with GPU DataFrames
+                cached_data = gpu_cached_data
+                logger.debug(f"Converted {len(cached_data)} cached symbols to GPU DataFrames")
+            except Exception as e:
+                logger.error(f"Error using GPU acceleration for cached data: {e}")
+        
         return cached_data
 
-    def _cache_data_in_redis(self, data: Dict[str, pd.DataFrame], timeframe: str) -> None:
+    def _cache_data_in_redis(self, data: Dict[str, Union[pd.DataFrame, 'cudf.DataFrame']], timeframe: str) -> None:
         """
         Cache data in Redis.
         
@@ -312,8 +371,19 @@ class DataFetcher:
             # Create Redis key
             redis_key = f"stocks:history:{symbol}:{self.data_days}d:{timeframe}"
             
-            # Cache data in Redis with 24 hour expiration
-            redis_client.set(redis_key, df, ex=86400)
+            # Convert to pandas if it's a cuDF DataFrame
+            if self.use_gpu and RAPIDS_AVAILABLE and isinstance(df, cudf.DataFrame):
+                try:
+                    pandas_df = df.to_pandas()
+                    # Cache data in Redis with 24 hour expiration
+                    redis_client.set(redis_key, pandas_df, ex=86400)
+                except Exception as e:
+                    logger.warning(f"Error converting GPU DataFrame to pandas for caching: {e}")
+                    # Try to cache the GPU DataFrame directly
+                    redis_client.set(redis_key, df, ex=86400)
+            else:
+                # Cache data in Redis with 24 hour expiration
+                redis_client.set(redis_key, df, ex=86400)
 
     def _fetch_from_polygon(self, symbols: List[str], timeframe: str) -> Dict[str, pd.DataFrame]:
         """
@@ -686,9 +756,22 @@ class DataFetcher:
             os.makedirs(price_data_dir, exist_ok=True)
             
             for symbol, df in self.price_data.items():
-                # Save as CSV
-                csv_path = os.path.join(price_data_dir, f"{symbol}.csv")
-                df.to_csv(csv_path)
+                # Convert to pandas if it's a cuDF DataFrame
+                if self.use_gpu and RAPIDS_AVAILABLE and isinstance(df, cudf.DataFrame):
+                    try:
+                        pandas_df = df.to_pandas()
+                        # Save as CSV
+                        csv_path = os.path.join(price_data_dir, f"{symbol}.csv")
+                        pandas_df.to_csv(csv_path)
+                    except Exception as e:
+                        logger.warning(f"Error converting GPU DataFrame to pandas for saving: {e}")
+                        # Try to save the GPU DataFrame directly
+                        csv_path = os.path.join(price_data_dir, f"{symbol}.csv")
+                        df.to_csv(csv_path)
+                else:
+                    # Save as CSV
+                    csv_path = os.path.join(price_data_dir, f"{symbol}.csv")
+                    df.to_csv(csv_path)
             
             logger.info(f"Saved price data for {len(self.price_data)} symbols to {price_data_dir}")
         
@@ -705,7 +788,7 @@ class DataFetcher:
             
             logger.info(f"Saved {len(self.news_data)} news items to {json_path}")
 
-    def load_data_from_disk(self, input_dir: str = None) -> Tuple[Dict[str, pd.DataFrame], List[dict]]:
+    def load_data_from_disk(self, input_dir: str = None) -> Tuple[Dict[str, Union[pd.DataFrame, 'cudf.DataFrame']], List[dict]]:
         """
         Load data from disk.
         
@@ -734,8 +817,19 @@ class DataFetcher:
                         csv_path = os.path.join(price_data_dir, file)
                         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
                         
-                        # Add to price data
-                        price_data[symbol] = df
+                        # Convert to GPU DataFrame if using GPU
+                        if self.use_gpu and RAPIDS_AVAILABLE:
+                            try:
+                                gpu_df = cudf.DataFrame.from_pandas(df)
+                                # Add to price data
+                                price_data[symbol] = gpu_df
+                            except Exception as e:
+                                logger.warning(f"Error converting {symbol} to GPU DataFrame during load: {e}")
+                                # Add original pandas DataFrame
+                                price_data[symbol] = df
+                        else:
+                            # Add to price data
+                            price_data[symbol] = df
                     except Exception as e:
                         logger.error(f"Error loading price data from {file}: {e}")
             
@@ -769,7 +863,7 @@ class DataFetcher:
         return price_data, news_data
 
 
-def fetch_data(symbols: List[str] = None, timeframe: str = "1d", data_days: int = 365) -> Dict[str, pd.DataFrame]:
+def fetch_data(symbols: List[str] = None, timeframe: str = "1d", data_days: int = 365, use_gpu: bool = True) -> Dict[str, Union[pd.DataFrame, 'cudf.DataFrame']]:
     """
     Fetches historical price data using the DataFetcher class.
 
@@ -777,11 +871,12 @@ def fetch_data(symbols: List[str] = None, timeframe: str = "1d", data_days: int 
         symbols: List of stock symbols to fetch.
         timeframe: Timeframe for the data (1d, 1h, etc.).
         data_days: Number of days of historical data to fetch.
+        use_gpu: Whether to use GPU acceleration if available.
 
     Returns:
         Dictionary of DataFrames with historical price data.
     """
-    fetcher = DataFetcher(data_days=data_days)
+    fetcher = DataFetcher(data_days=data_days, use_gpu=use_gpu)
     if not symbols:
         symbols = fetcher.get_universe() # Get default universe if none provided
     return fetcher.fetch_historical_data(symbols=symbols, timeframe=timeframe)
@@ -816,6 +911,9 @@ def main():
     
     parser.add_argument("--output-dir", type=str, default=None,
                        help="Directory to save data to")
+                       
+    parser.add_argument("--gpu", action="store_true",
+                       help="Use GPU acceleration if available")
     
     args = parser.parse_args()
     
@@ -825,7 +923,8 @@ def main():
         use_polygon=True,
         use_alpha_vantage=True,
         use_redis_cache=True,
-        data_dir=args.output_dir
+        data_dir=args.output_dir,
+        use_gpu=args.gpu
     )
     
     # Get symbols
@@ -844,13 +943,20 @@ def main():
     # Print summary of price data
     print(f"\nPrice Data Summary:")
     print(f"Total symbols: {len(price_data)}")
+    print(f"Using GPU acceleration: {data_fetcher.use_gpu}")
     
     if price_data:
         # Print a few examples
         for symbol in list(price_data.keys())[:3]:
             df = price_data[symbol]
-            print(f"\n{symbol} data ({len(df)} records):")
-            print(df.head())
+            # Convert to pandas for display if it's a cuDF DataFrame
+            if data_fetcher.use_gpu and RAPIDS_AVAILABLE and isinstance(df, cudf.DataFrame):
+                display_df = df.head().to_pandas()
+                print(f"\n{symbol} data ({len(df)} records, GPU accelerated):")
+                print(display_df)
+            else:
+                print(f"\n{symbol} data ({len(df)} records):")
+                print(df.head())
     
     # Fetch news data if requested
     if args.news:

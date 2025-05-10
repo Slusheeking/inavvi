@@ -22,6 +22,15 @@ from torch.distributions import Normal
 from torch.optim import Adam
 from sklearn.preprocessing import StandardScaler # Import StandardScaler
 
+# Import RAPIDS libraries
+try:
+    import cudf
+    import cupy as cp
+    from cuml.preprocessing import StandardScaler as CumlStandardScaler
+    RAPIDS_AVAILABLE = True
+except ImportError:
+    RAPIDS_AVAILABLE = False
+
 from src.config.settings import settings
 from src.models.pattern_recognition import pattern_recognition_model
 from src.utils.logging import setup_logger, log_execution_time
@@ -32,6 +41,14 @@ logger = setup_logger("exit_optimization")
 # Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() and settings.advanced.use_gpu else "cpu")
 logger.info(f"Using device: {device}")
+
+# Enable RAPIDS acceleration for pandas operations where possible
+if RAPIDS_AVAILABLE:
+    try:
+        cudf.pandas_accelerator()
+        logger.info("RAPIDS pandas accelerator enabled for exit_optimization")
+    except Exception as e:
+        logger.warning(f"Could not enable RAPIDS pandas accelerator: {e}")
 
 # Legacy model for compatibility with older saved models
 class LegacyModel(nn.Module):
@@ -911,6 +928,176 @@ class ExitOptimizationModel:
         if len(ohlcv_data) < 20:
             logger.error(f"Not enough data: {len(ohlcv_data)} < 20")
             return np.zeros(len(self.feature_names))
+            
+        # Try to use GPU acceleration if available
+        if RAPIDS_AVAILABLE:
+            try:
+                # Convert to cuDF DataFrame for GPU acceleration
+                gpu_df = cudf.DataFrame.from_pandas(ohlcv_data.copy())
+                
+                # Get basic values
+                current_price = float(gpu_df["close"].iloc[-1])
+                entry_price = position_data.get("entry_price", current_price)
+                entry_time = position_data.get("entry_time", ohlcv_data.index[0])
+                position_size = position_data.get("position_size", 1.0)
+                
+                # Handle entry_time
+                if isinstance(entry_time, str):
+                    try:
+                        entry_time = pd.Timestamp(entry_time)
+                    except:
+                        entry_time = ohlcv_data.index[0]
+                
+                # Calculate time in trade (using pandas for timestamp operations)
+                time_in_trade = (ohlcv_data.index[-1] - entry_time).total_seconds() / 86400
+                time_in_trade = min(time_in_trade, 1.0)
+                
+                # Calculate profit percentage
+                profit_pct = (current_price / entry_price - 1) * 100
+                
+                # Get high and low since entry (using pandas for loc operations)
+                if entry_time in ohlcv_data.index:
+                    high_since_entry = float(ohlcv_data["high"].loc[entry_time:].max())
+                    low_since_entry = float(ohlcv_data["low"].loc[entry_time:].min())
+                else:
+                    high_since_entry = float(gpu_df["high"].max())
+                    low_since_entry = float(gpu_df["low"].min())
+                
+                # Calculate price ratios
+                price_to_entry = current_price / entry_price - 1
+                price_to_high = current_price / high_since_entry - 1 if high_since_entry > 0 else 0
+                price_to_low = current_price / low_since_entry - 1 if low_since_entry > 0 else 0
+                
+                # Calculate RSI on GPU
+                delta = gpu_df["close"].diff()
+                gain = delta.where(delta > 0, 0)
+                loss = -delta.where(delta < 0, 0)
+                avg_gain = gain.rolling(14).mean()
+                avg_loss = loss.rolling(14).mean()
+                rs = avg_gain / avg_loss
+                rsi_14 = 100 - (100 / (1 + rs))
+                
+                # Calculate Bollinger Bands on GPU
+                bb_middle = gpu_df["close"].rolling(20).mean()
+                bb_std = gpu_df["close"].rolling(20).std()
+                bb_upper = bb_middle + 2 * bb_std
+                bb_lower = bb_middle - 2 * bb_std
+                bb_position = (current_price - float(bb_lower.iloc[-1])) / (float(bb_upper.iloc[-1]) - float(bb_lower.iloc[-1]) + 1e-8)
+                
+                # Calculate MACD on GPU
+                ema_12 = gpu_df["close"].ewm(span=12, adjust=False).mean()
+                ema_26 = gpu_df["close"].ewm(span=26, adjust=False).mean()
+                macd = ema_12 - ema_26
+                macd_signal = macd.ewm(span=9, adjust=False).mean()
+                macd_histogram = macd - macd_signal
+                
+                # Calculate volatility on GPU
+                gpu_df["returns"] = gpu_df["close"].pct_change()
+                volatility_5d = float(gpu_df["returns"].rolling(5).std().iloc[-1]) * 100
+                
+                # Calculate ATR on GPU
+                tr1 = gpu_df["high"] - gpu_df["low"]
+                tr2 = (gpu_df["high"] - gpu_df["close"].shift(1)).abs()
+                tr3 = (gpu_df["low"] - gpu_df["close"].shift(1)).abs()
+                
+                # Need to convert to pandas for max operation across columns
+                tr_df = pd.DataFrame({
+                    'tr1': tr1.to_pandas(),
+                    'tr2': tr2.to_pandas(),
+                    'tr3': tr3.to_pandas()
+                })
+                tr = tr_df.max(axis=1)
+                atr = float(tr.rolling(14).mean().iloc[-1])
+                normalized_atr = atr / current_price * 100
+                
+                # Calculate volume metrics on GPU
+                volume_sma_5 = gpu_df["volume"].rolling(5).mean()
+                volume_ratio_5 = float(gpu_df["volume"].iloc[-1]) / float(volume_sma_5.iloc[-1]) if float(volume_sma_5.iloc[-1]) else 1.0
+                
+                # Get market and sector trends
+                market_trend = 0.0
+                sector_trend = 0.0
+                if "spy" in position_data or "market_trend" in position_data:
+                    market_trend = position_data.get("market_trend", position_data.get("spy", 0.0))
+                else:
+                    if len(gpu_df) >= 50:
+                        market_trend = (float(gpu_df["close"].iloc[-1]) / float(gpu_df["close"].iloc[-50]) - 1) * 100 / 10
+                        market_trend = max(min(market_trend, 1.0), -1.0)
+                if "sector_trend" in position_data:
+                    sector_trend = position_data.get("sector_trend", 0.0)
+                
+                # Calculate Sharpe ratio (convert to pandas for dropna)
+                returns = gpu_df["returns"].to_pandas().iloc[-20:].dropna()
+                sharpe_ratio = returns.mean() / returns.std() if len(returns) > 1 and returns.std() > 0 else 0.0
+                
+                # Calculate drawdown (using cupy for GPU acceleration)
+                if entry_time in ohlcv_data.index:
+                    close_prices = cp.array(ohlcv_data["close"].loc[entry_time:].values)
+                else:
+                    close_prices = cp.array(gpu_df["close"].values)
+                    
+                peak = cp.maximum.accumulate(close_prices)
+                drawdown = (peak - close_prices) / peak
+                max_drawdown = float(cp.max(drawdown)) if len(drawdown) > 0 else 0.0
+                
+                # Clip values
+                profit_pct = cp.clip(profit_pct, -20, 20)
+                rsi_14_value = cp.clip(float(rsi_14.iloc[-1]) / 100, 0, 1)
+                bb_position = cp.clip(bb_position, 0, 1)
+                macd_hist = cp.clip(float(macd_histogram.iloc[-1]), -1, 1)
+                volume_ratio_5 = cp.clip(volume_ratio_5, 0, 5)
+                
+                # Create feature array
+                features = cp.array([
+                    profit_pct / 20,
+                    time_in_trade,
+                    position_size,
+                    cp.clip(price_to_entry, -1, 1),
+                    cp.clip(price_to_high, -1, 0),
+                    cp.clip(price_to_low, 0, 1),
+                    rsi_14_value,
+                    bb_position,
+                    macd_hist,
+                    cp.clip(volatility_5d / 5, 0, 1),
+                    cp.clip(normalized_atr / 5, 0, 1),
+                    volume_ratio_5 / 5,
+                    cp.clip(market_trend, -1, 1),
+                    cp.clip(sector_trend, -1, 1),
+                    cp.clip(sharpe_ratio, -1, 1),
+                    cp.clip(max_drawdown, 0, 1),
+                ], dtype=cp.float32)
+                
+                # Check for and handle NaN or infinite values
+                if cp.any(cp.isnan(features)) or cp.any(cp.isinf(features)):
+                    logger.warning(f"Detected NaN or infinite values in features")
+                    # Replace NaN with 0 and infinite values with a large number (or clip)
+                    features = cp.nan_to_num(features, nan=0.0, posinf=1e10, neginf=-1e10)
+                    # Re-clip features after handling NaN/inf
+                    features[0] = cp.clip(features[0], -20/20, 20/20)  # profit_pct / 20
+                    features[1] = cp.clip(features[1], 0, 1)  # time_in_trade
+                    features[3] = cp.clip(features[3], -1, 1)  # price_to_entry
+                    features[4] = cp.clip(features[4], -1, 0)  # price_to_high
+                    features[5] = cp.clip(features[5], 0, 1)  # price_to_low
+                    features[6] = cp.clip(features[6], 0, 1)  # rsi_14
+                    features[7] = cp.clip(features[7], 0, 1)  # bb_position
+                    features[8] = cp.clip(features[8], -1, 1)  # macd_hist
+                    features[9] = cp.clip(features[9], 0, 1)  # volatility_5d / 5
+                    features[10] = cp.clip(features[10], 0, 1)  # normalized_atr / 5
+                    features[11] = cp.clip(features[11], 0, 5/5)  # volume_ratio_5 / 5
+                    features[12] = cp.clip(features[12], -1, 1)  # market_trend
+                    features[13] = cp.clip(features[13], -1, 1)  # sector_trend
+                    features[14] = cp.clip(features[14], -1, 1)  # sharpe_ratio
+                    features[15] = cp.clip(features[15], 0, 1)  # max_drawdown
+                
+                # Convert back to numpy array
+                logger.debug("Used GPU acceleration for feature extraction")
+                return cp.asnumpy(features)
+                
+            except Exception as e:
+                logger.warning(f"GPU acceleration failed, falling back to pandas: {e}")
+                # Fall back to pandas implementation
+        
+        # Pandas implementation (CPU)
         df = ohlcv_data.copy()
         current_price = df["close"].iloc[-1]
         entry_price = position_data.get("entry_price", current_price)
@@ -1099,7 +1286,13 @@ class ExitOptimizationModel:
         if market_data:
             recommendation["market_context"] = self._get_market_summary(market_data)
         manual_checks = self._check_manual_exit_conditions(ohlcv_data, position_data)
+        logger.info(f"Recommendation before update: {recommendation}")
         recommendation.update(manual_checks)
+        logger.info(f"Recommendation after update: {recommendation}")
+        logger.info(f"Recommendation before update: {recommendation}")
+        recommendation.update(manual_checks)
+        logger.info(f"Recommendation after update: {recommendation}")
+        logger.info(f"Updated recommendation with manual checks: {recommendation}")
         if any(manual_checks.values()):
             exit_reasons = []
             if manual_checks.get("stop_loss_triggered", False):
@@ -1210,6 +1403,7 @@ class ExitOptimizationModel:
             time_diff = (ohlcv_data.index[-1] - entry_time).total_seconds() / 3600
             if time_diff >= max_time:
                 results["time_stop_triggered"] = True
+        logger.info(f"Manual exit checks: {results}")
         return results
 
     def _calculate_risk_metrics(self, ohlcv_data: pd.DataFrame, position_data: Dict) -> Dict:

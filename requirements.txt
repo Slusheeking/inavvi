@@ -60,6 +60,15 @@ dash-bootstrap-components>=1.4.0
 plotly>=5.14.0
 
 # Monitoring and logging
+# RAPIDS libraries for GPU acceleration (CUDA 12.0)
+cudf-cu12==25.04.00
+cuml-cu12==25.04.00
+cuspatial-cu12==25.04.00
+cugraph-cu12==25.04.00
+cupy-cuda12x==12.3.0
+dask-cuda==25.04.00
+dask-cudf==25.04.00
+distributed-ucxx-cu12==0.43.0
 prometheus-client>=0.16.0
 
 # Testing
