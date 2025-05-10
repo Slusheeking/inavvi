@@ -78,7 +78,7 @@ class TestPatternRecognitionModel(unittest.TestCase):
         sample, label = dataset[0]
 
         # Check sample shape
-        self.assertEqual(sample.shape, (5, 20))  # 5 channels, 20 bars
+        self.assertEqual(sample.shape, (15, 20))  # 15 channels (OHLCV + indicators), 20 bars
 
         # Check label
         self.assertEqual(label, 0)

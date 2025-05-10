@@ -58,6 +58,14 @@ model:
   sentiment_model_path: ${SENTIMENT_MODEL_PATH}
   exit_model_path: ${EXIT_MODEL_PATH}
   
+  # Ranking model factor weights
+  factor_weights:
+    momentum: 0.3
+    volume: 0.2
+    volatility: 0.2
+    trend: 0.2
+    value: 0.1
+  
   # Model parameters
   lookback_period: 20
   confidence_threshold: 0.6

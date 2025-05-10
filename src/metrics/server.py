@@ -3,13 +3,23 @@ Metrics server for exposing trading system metrics.
 """
 
 import asyncio
+import os
+import sys
 import time
 from datetime import datetime
 from typing import List, Optional
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# Handle imports differently when run as a script vs imported as a module
+if __name__ == "__main__":
+    # Add the project root to the Python path when run directly
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
 
 from src.config.settings import settings
 from src.utils.logging import setup_logger
@@ -18,11 +28,26 @@ from src.utils.redis_client import redis_client
 # Set up logger
 logger = setup_logger("metrics_server")
 
-# Create FastAPI app
+# Define lifespan context manager for FastAPI app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for FastAPI app."""
+    # Start background tasks on startup
+    broadcast_task = asyncio.create_task(broadcast_updates())
+    yield
+    # Cancel background tasks on shutdown
+    broadcast_task.cancel()
+    try:
+        await broadcast_task
+    except asyncio.CancelledError:
+        logger.info("Background task cancelled")
+
+# Create FastAPI app with lifespan
 app = FastAPI(
     title="Trading System Metrics",
     description="API for trading system metrics and control",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Add CORS middleware
@@ -336,12 +361,6 @@ async def broadcast_updates():
 
         # Wait before next update
         await asyncio.sleep(5)  # Update every 5 seconds
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Start background tasks on startup."""
-    asyncio.create_task(broadcast_updates())
 
 
 if __name__ == "__main__":

@@ -10,6 +10,14 @@ This module contains machine learning and quantitative models:
 
 import importlib
 import functools
+import os
+import sys
+from pathlib import Path
+
+# Add the project root directory to the Python path
+project_root = str(Path(__file__).parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # Lazy loading mechanism for models to improve import performance
 @functools.lru_cache(maxsize=None)
@@ -25,19 +33,16 @@ def get_model(name):
         class: The requested model class
     """
     if name == "RankingModel":
-        from .ranking_model import RankingModel
+        from src.models.ranking_model import RankingModel
         return RankingModel
-    elif name == "MultiFactorRankingModel":
-        from .multi_factor_ranking import MultiFactorRankingModel
-        return MultiFactorRankingModel
     elif name == "SentimentModel":
-        from .sentiment import SentimentModel
+        from src.models.sentiment import SentimentModel
         return SentimentModel
     elif name == "PatternRecognitionModel":
-        from .pattern_recognition import PatternRecognitionModel
+        from src.models.pattern_recognition import PatternRecognitionModel
         return PatternRecognitionModel
     elif name == "ExitOptimizationModel":
-        from .exit_optimization import ExitOptimizationModel
+        from src.models.exit_optimization import ExitOptimizationModel
         return ExitOptimizationModel
     else:
         raise ValueError(f"Unknown model: {name}")
@@ -59,13 +64,12 @@ class ExitOptimizationModel:
     def __new__(cls, *args, **kwargs):
         return get_model("ExitOptimizationModel")(*args, **kwargs)
 
-# Import key functions
-from .multi_factor_ranking import rank_opportunities, get_model_weights
+# Import key functions - moved after the path modification for direct script execution
+from src.models.ranking_model import rank_opportunities, get_model_weights
 
 __all__ = [
     # Model classes
     "RankingModel",
-    "MultiFactorRankingModel",
     "SentimentModel",
     "PatternRecognitionModel",
     "ExitOptimizationModel",

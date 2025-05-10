@@ -118,6 +118,15 @@ class ModelSettings(BaseSettings):
     ranking_model_path: str = Field("models/ranking_model.pkl", env="RANKING_MODEL_PATH")
     sentiment_model_path: str = Field("models/sentiment_model.pt", env="SENTIMENT_MODEL_PATH")
     exit_model_path: str = Field("models/exit_optimization.pt", env="EXIT_MODEL_PATH")
+    
+    # Model parameters
+    lookback_period: int = Field(20, env="LOOKBACK_PERIOD")
+    confidence_threshold: float = Field(0.6, env="CONFIDENCE_THRESHOLD")
+    
+    # Training parameters
+    epochs: int = Field(50, env="EPOCHS")
+    batch_size: int = Field(32, env="BATCH_SIZE")
+    learning_rate: float = Field(0.001, env="LEARNING_RATE")
 
     model_config = {
         "env_file": ".env",
