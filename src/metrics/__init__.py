@@ -7,16 +7,6 @@ This module provides monitoring and metrics collection capabilities:
 - API for retrieving metrics
 """
 
-from .server import (
-    MetricsServer,
-    start_metrics_server,
-    get_metrics_server,
-    metrics_server
-)
+from .server import MetricsServer, get_metrics_server, metrics_server, start_metrics_server
 
-__all__ = [
-    "MetricsServer",
-    "start_metrics_server",
-    "get_metrics_server",
-    "metrics_server"
-]
+__all__ = ["MetricsServer", "start_metrics_server", "get_metrics_server", "metrics_server"]

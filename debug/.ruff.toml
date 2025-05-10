@@ -1,0 +1,68 @@
+# Ruff configuration file for inavvi-1 trading system
+
+# Line length
+line-length = 100
+
+[lint]
+# Enable flake8-bugbear (`B`) rules.
+select = ["E", "F", "B", "W", "I", "N"]
+
+# Exclude some directories from linting
+exclude = [
+    ".git",
+    ".github",
+    "__pycache__",
+    "node_modules",
+    "venv",
+    "env",
+    ".venv",
+    ".env",
+    ".vscode",
+    ".idea",
+    "build",
+    "dist",
+]
+
+# Ignore specific error codes:
+# F401 - unused imports (handled separately in future PRs)
+# E402 - module level import not at top of file (in decorator implementations)
+# E722 - do not use bare 'except' (will be fixed in future PRs)
+# E501 - line too long (will be addressed in future PRs)
+# W293 - blank line contains whitespace
+# N812 - lowercase imported as non-lowercase
+# B904 - Within except clause, raise should include from
+# N806 - Variable in function should be lowercase (common in ML code)
+# F403 - 'from module import *' used; unable to detect undefined names
+# F405 - Name may be undefined, or defined from star imports
+# F821 - Undefined name
+# F541 - f-string is missing placeholders
+# N801 - Class name should use CapWords (in type stubs, we match library naming)
+# N802 - Function name should be lowercase (in some library interfaces)
+# N818 - Exception should be named with Error suffix
+# W291 - Trailing whitespace
+# W292 - No newline at end of file
+ignore = [
+    "F401", "E402", "E722", "E501", "W293", "N812",
+    "B904", "N806", "F403", "F405", "F821", "F541",
+    "N801", "N802", "N818", "W291", "W292"
+]
+
+# Allow unused variables when they are prefixed with an underscore
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+# Additional configuration
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports in init files
+"typings/**/*.pyi" = [
+    "N801", "N802", "N818", "W291", "W292",  # Allow non-conventional naming in type stubs
+    "F401", "UP006", "UP007", "UP035", "UP037", "A003", "T201"  # Type stub specific lint rules
+]
+"mocks/**/*.py" = ["N801", "N802", "F401", "UP035"]  # Allow non-conventional naming in mocks
+"test_*.py" = ["T201", "F401"]  # Allow print in test files
+"check_sqlalchemy.py" = ["T201", "F401"]  # Allow print and unused imports in helper script
+"run_all_imports.py" = ["T201"]  # Allow print statements in import checker
+"fix_sqlalchemy_errors.py" = ["T201"]  # Allow print statements in fix script
+
+[format]
+quote-style = "double"
+indent-style = "space"

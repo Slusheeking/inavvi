@@ -7,8 +7,8 @@ This module provides functionality for training ML models:
 - Cross-validation utilities
 """
 
-from .train_models import train_models
 from .data_preparation import prepare_training_data
+from .train_models import train_models
 
 __all__ = [
     "train_models",

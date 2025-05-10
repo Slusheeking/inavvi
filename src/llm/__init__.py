@@ -7,50 +7,48 @@ This module provides functionality for working with large language models:
 - LLM provider routing
 """
 
-from .prompts import PromptTemplates
 from .parsing import (
-    parse_trade_decision,
-    parse_exit_decision,
-    parse_market_analysis,
     extract_json_from_text,
-    parse_llm_response,
     extract_market_analysis,
     extract_sentiment_score,
+    extract_structured_data,
     extract_trading_signals,
-    extract_structured_data
+    parse_exit_decision,
+    parse_llm_response,
+    parse_market_analysis,
+    parse_trade_decision,
 )
-from .router import (
-    openrouter_client,
-    get_llm_router,
-    LLMRouter,
-    llm_router
-)
+from .prompts import PromptTemplates
+from .router import LLMRouter, get_llm_router, llm_router, openrouter_client
+
 
 # Create module-level convenience functions that delegate to PromptTemplates class methods
 def get_prompt_template(task_type: str) -> str:
     """
     Get the appropriate prompt template for a specific task.
-    
+
     Args:
         task_type: The type of task (e.g., "market_analysis", "pattern_recognition")
-        
+
     Returns:
         The corresponding prompt template string
     """
     return PromptTemplates.get_prompt_template(task_type)
 
+
 def render_prompt(template: str, data: dict) -> str:
     """
     Format a prompt template with provided data.
-    
+
     Args:
         template: The prompt template string
         data: A dictionary of values to insert into the template
-        
+
     Returns:
         The formatted prompt string
     """
     return PromptTemplates.render_prompt(template, data)
+
 
 # Create module-level constants that reference class attributes
 MARKET_ANALYSIS_PROMPT = PromptTemplates.MARKET_ANALYSIS_PROMPT
@@ -67,7 +65,6 @@ __all__ = [
     "SENTIMENT_ANALYSIS_PROMPT",
     "PATTERN_RECOGNITION_PROMPT",
     "TRADING_DECISION_PROMPT",
-
     # Parsing
     "parse_trade_decision",
     "parse_exit_decision",
@@ -78,10 +75,9 @@ __all__ = [
     "extract_sentiment_score",
     "extract_trading_signals",
     "extract_structured_data",
-
     # Router
     "openrouter_client",
     "get_llm_router",
     "LLMRouter",
-    "llm_router"
+    "llm_router",
 ]

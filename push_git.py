@@ -4,8 +4,8 @@ Simple Git automation script for the FinGPT AI Day Trading System.
 Performs: git status, git add, git commit with timestamp, and git push.
 """
 
-import subprocess
 import datetime
+import subprocess
 
 
 def run_command(command):

@@ -5,22 +5,37 @@ polygon-api-client>=1.0.0
 yfinance>=0.2.12
 
 # Web Framework
-fastapi>=0.100.0
+fastapi==0.115.9  # Pinned for compatibility with chromadb 1.0.8
 uvicorn>=0.20.0
 websockets>=10.0.0
 httpx>=0.24.0
 
 # Data Processing
 pandas>=2.0.0
-numpy>=1.24.0
-scipy>=1.10.0
+numpy>=1.18.5,<2.0  # Downgraded for compatibility with gensim 4.3.3
+scipy>=1.7.0,<1.14.0  # Downgraded for compatibility with gensim 4.3.3
 
 # ML libraries
-scikit-learn==1.2.0
-torch==2.0.0
+scikit-learn>=1.4.0  # Updated for compatibility with autogluon packages
+torch>=2.3.0  # Updated for compatibility with stable-baselines3, pytorch-lightning, and autogluon
 transformers==4.38.0
-sentence-transformers==2.2.0
+sentence-transformers==2.2.2
+huggingface_hub>=0.22.0
 xgboost==2.0.0  # Gradient boosting library
+
+# Additional ML libraries that caused conflicts (explicitly managed)
+thinc>=8.3.4,<8.4.0  # Pinned for compatibility with spacy 3.8.5
+stable-baselines3>=2.6.0
+pytorch-lightning>=2.5.1.post0
+lightning>=2.5.1.post0
+chromadb>=1.0.8
+
+# Autogluon packages
+autogluon-core>=1.3.0
+autogluon-features>=1.3.0
+autogluon-multimodal>=1.3.0
+autogluon-tabular>=1.3.0
+autogluon-timeseries>=1.3.0
 
 # Database
 redis>=4.5.0
@@ -49,3 +64,6 @@ prometheus-client>=0.16.0
 # Testing
 pytest>=8.0.0
 pylint>=3.0.0
+
+# Required for distributed-ucxx-cu12
+numba>=0.59.1,<0.61.0a0  # Pinned for compatibility with distributed-ucxx-cu12 0.43.0
