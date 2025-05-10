@@ -27,7 +27,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Import trading system components for test fixtures
-from src.models import PatternRecognitionModel, RankingModel, SentimentModel
+from src.models import PatternRecognitionModel, RankingModel, FinancialSentimentModel
 from src.utils import get_logger
 
 # Configure test logger

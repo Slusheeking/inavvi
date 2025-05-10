@@ -155,6 +155,17 @@ class LoggingSettings(BaseSettings):
     }
 
 
+class AdvancedSettings(BaseSettings):
+    """Advanced configuration settings."""
+
+    use_gpu: bool = Field(False, env="USE_GPU")
+
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "allow",
+    }
+
 class Settings(BaseSettings):
     """Main settings class that combines all configurations."""
 
@@ -165,6 +176,7 @@ class Settings(BaseSettings):
     timing: TimingSettings = TimingSettings()
     model: ModelSettings = ModelSettings()
     logging: LoggingSettings = LoggingSettings()
+    advanced: AdvancedSettings = AdvancedSettings()
 
     # Additional system-wide settings
     app_name: str = "Day Trading System"

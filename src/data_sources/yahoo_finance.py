@@ -139,7 +139,7 @@ class YahooFinanceAPI:
             redis_client.set_stock_data(symbol, info, "info")
 
             return info
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching ticker info for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -186,7 +186,7 @@ class YahooFinanceAPI:
             redis_client.set(redis_key, hist, expiry=3600)
 
             return hist
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching historical prices for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -243,7 +243,7 @@ class YahooFinanceAPI:
             redis_client.set(redis_key, intraday, expiry=300)
 
             return intraday
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching intraday prices for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -303,7 +303,7 @@ class YahooFinanceAPI:
             redis_client.set(f"stocks:financials:{symbol}", financials, expiry=86400)
 
             return financials
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching financials for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -352,7 +352,7 @@ class YahooFinanceAPI:
             redis_client.set(f"stocks:earnings:{symbol}", earnings_data, expiry=21600)
 
             return earnings_data
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching earnings for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -396,7 +396,7 @@ class YahooFinanceAPI:
             redis_client.set(f"stocks:recommendations:{symbol}", recommendations, expiry=21600)
 
             return recommendations
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching analyst recommendations for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -486,7 +486,7 @@ class YahooFinanceAPI:
             redis_client.set(f"stocks:institutional_holders:{symbol}", holders, expiry=86400)
 
             return holders
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching institutional holders for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -528,7 +528,7 @@ class YahooFinanceAPI:
             redis_client.set(f"stocks:major_holders:{symbol}", holders, expiry=86400)
 
             return holders
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching major holders for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -589,7 +589,7 @@ class YahooFinanceAPI:
             redis_client.set(redis_key, chain, expiry=3600)
 
             return chain
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching options chain for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -632,7 +632,7 @@ class YahooFinanceAPI:
             redis_client.set(redis_key, expirations, expiry=3600)
 
             return expirations
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching option expirations for {symbol}: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -723,7 +723,7 @@ class YahooFinanceAPI:
 
             logger.info(f"Screened {len(matches)} stocks matching criteria")
             return matches
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error screening stocks: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():
@@ -757,7 +757,7 @@ class YahooFinanceAPI:
 
             logger.info(f"Successfully fetched {len(symbols)} symbols for default universe")
             return symbols
-        except yf.shared.YahooFinanceError as e:
+        except Exception as e:  # Changed to generic Exception
             logger.error(f"Yahoo Finance error fetching default universe: {e}")
             # Attempt to classify specific Yahoo Finance errors
             if "rate limit" in str(e).lower():

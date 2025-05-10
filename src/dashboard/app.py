@@ -16,11 +16,6 @@ from src.config.settings import settings
 from src.utils.logging import setup_logger
 from src.utils.redis_client import redis_client
 
-# Previously these were relative imports:
-# from ...config.settings import settings
-# from ...utils.logging import setup_logger
-# from ...utils.redis_client import redis_client
-
 # Set up logger
 logger = setup_logger("dashboard")
 

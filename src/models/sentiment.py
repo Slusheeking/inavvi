@@ -26,7 +26,8 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precisio
 from textblob import TextBlob
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer, AdamW, get_linear_schedule_with_warmup
+from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup
+from torch.optim import AdamW
 
 from src.config.settings import settings
 from src.utils.logging import setup_logger, log_execution_time
@@ -99,7 +100,7 @@ class SentimentDataset(Dataset):
         text = self.texts[idx]
         if self.tokenizer:
             encoding = self.tokenizer(
-                text,
+              text,
                 truncation=True,
                 padding="max_length",
                 max_length=self.max_length,
@@ -627,14 +628,15 @@ class FinancialSentimentModel:
             if entities and self.entity_tracker:
                 for entity in entities:
                     entity_sentiment = self._get_entity_sentiment(text, entity)
-                    entity.update(entity_sentiment)
-                    if self.temporal_tracking:
-                        self.entity_tracker.add_entity_sentiment(
-                            entity["text"],
-                            entity_sentiment["sentiment_score"],
-                            datetime.now().isoformat(),
-                            importance=entity_sentiment["relevance_score"],
-                        )
+            if entity_sentiment:
+                item.update(entity_sentiment)
+            if self.temporal_tracking:
+                self.entity_tracker.add_entity_sentiment(
+                    entity["text"],
+                    entity_sentiment["sentiment_score"],
+                    datetime.now().isoformat(),
+                    importance=entity_sentiment["relevance_score"],
+                )
         result = {"sentiment": sentiment_scores, "entities": entities}
         if extract_entities and len(entities) > 1 and self.entity_tracker:
             for i, entity1 in enumerate(entities):
@@ -660,12 +662,13 @@ class FinancialSentimentModel:
             for model_key, model in self.models.items():
                 tokenizer = self.tokenizers[model_key]
                 inputs = tokenizer(
-                    text,
-                    truncation=True,
-                    padding=True,
-                    max_length=self.model_config["max_length"],
-                    return_tensors="pt",
-                ).to(device)
+    text,
+    truncation=True,
+    padding=True,
+    max_length=self.model_config["max_length"],
+    return_tensors="pt",
+).to(device) # Corrected: move .to(device) here
+                # inputs = {k: v.to(device) for k, v in inputs.items()} # This line is now redundant
                 with torch.no_grad():
                     outputs = model(**inputs)
                     logits = outputs.logits

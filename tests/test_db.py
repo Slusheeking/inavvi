@@ -1,6 +1,15 @@
-#!/usr/bin/env python
+##!/usr/bin/env python
 """
 Test script for TimescaleDB client.
+
+This test script verifies the functionality of the TimescaleDB client with PostgreSQL 17
+and TimescaleDB extension. It tests the following:
+1. Connection to the trading_system database
+2. Table creation and hypertable conversion
+3. Basic CRUD operations
+4. Batch data operations
+5. Time-bucket aggregation queries
+6. Retention and compression policies (TimescaleDB specific features)
 """
 
 import os
@@ -18,8 +27,13 @@ from src.utils.db_client import MetricsData, PriceData, TradeData, timescaledb_c
 
 
 def test_database():
-    """Tests TimescaleDB connection, table creation, and data operations."""
-    print("Testing TimescaleDB...")
+    """
+    Tests TimescaleDB connection, table creation, and data operations.
+    
+    This test verifies connectivity to PostgreSQL 17 with TimescaleDB extension
+    and tests basic data operations on the trading_system database.
+    """
+    print("Testing PostgreSQL 17 with TimescaleDB extension...")
 
     try:
         # Ensure tables are created
@@ -92,8 +106,15 @@ def test_database():
 
 
 def test_batch_operations():
-    """Tests batch operations for TimescaleDB client."""
-    print("Testing batch operations...")
+    """
+    Tests batch operations and time-bucket aggregation with TimescaleDB.
+    
+    PostgreSQL 17 with TimescaleDB extension provides optimized handling for:
+    - Batch insertions (efficiently loading large volumes of time-series data)
+    - Time-bucket aggregation (specialized time-series queries using the time_bucket function)
+    - These features are critical for high-performance time-series analytics
+    """
+    print("Testing TimescaleDB batch operations and aggregations in PostgreSQL 17...")
 
     try:
         # Generate batch price data
@@ -206,8 +227,15 @@ def test_batch_operations():
 
 
 def test_retention_and_compression():
-    """Tests retention policy and compression features."""
-    print("Testing retention and compression features...")
+    """
+    Tests TimescaleDB-specific retention policy and compression features.
+    
+    PostgreSQL 17 with TimescaleDB extension provides built-in capabilities for:
+    - Automatic data retention (removing old data)
+    - Transparent data compression (reducing storage footprint)
+    - These features are particularly important for time-series data
+    """
+    print("Testing TimescaleDB retention and compression features in PostgreSQL 17...")
 
     try:
         # Set up retention policy (30 days)
@@ -233,9 +261,18 @@ if __name__ == "__main__":
 
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+    print("\n\n===== TESTING POSTGRESQL 17 WITH TIMESCALEDB EXTENSION =====\n")
+    print("Database: trading_system")
+    print("User: trading_user")
+    print("TimescaleDB Tables:")
+    print("  - price_data (hypertable)")
+    print("  - trade_data (hypertable)")
+    print("  - metrics_data (hypertable)")
+    print("\n==========================================================\n")
+
     # Run all tests
     test_database()
     test_batch_operations()
     test_retention_and_compression()
 
-    print("All TimescaleDB tests completed successfully!")
+    print("\n===== ALL POSTGRESQL 17 WITH TIMESCALEDB TESTS COMPLETED SUCCESSFULLY! =====")

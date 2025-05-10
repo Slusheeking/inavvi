@@ -49,7 +49,17 @@ class RankingModel:
             model_version: Model version to use ('ensemble', 'xgboost', 'lightgbm', 'catboost', 'rf').
         """
         self.models: Dict[str, Any] = {}
-        self.feature_names: List[str] = []
+        self.feature_names: List[str] = [
+    "open", "high", "low", "close", "volume",
+    "return_1d", "return_5d", "return_10d",
+    "close_ma5_ratio", "close_ma10_ratio", "close_ma20_ratio",
+    "ma5_ma20_ratio", "volatility_5d", "volatility_10d", "volatility_20d",
+    "volume_1d", "volume_ma5", "volume_ma10",
+    "volume_ratio_5d", "volume_ratio_10d", "volume_trend_5d",
+    "daily_range", "daily_range_avg_5d", "body_size", "body_size_avg_5d",
+    "upper_shadow", "lower_shadow", "is_bullish", "gap_pct",
+    "rsi", "bb_width", "percent_b", "macd", "macd_signal", "macd_hist"
+]
         self.model_version = model_version
         self.model_dir = os.path.join(settings.models_dir, "ranking")
         self.model_path = getattr(settings.model, "ranking_model_path", os.path.join(self.model_dir, "model.pt"))
@@ -216,7 +226,39 @@ class RankingModel:
                     metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
                     logger.info(f"    {model_name}: {metrics_str}")
 
-    def save_model(self) -> bool:
+    def predict(self, data: pd.DataFrame) -> float:
+        """
+        Predict the score for a given dataset.
+
+        Args:
+            data: DataFrame containing the features.
+
+        Returns:
+            Predicted score.
+        """
+        if not self.models:
+            logger.warning("No models loaded, returning default score of 0.0")
+            return 0.0
+
+        features = self.scaler.transform(data[self.feature_names])
+        ensemble_pred = self._ensemble_predict(features)
+        return float(ensemble_pred[0])
+
+    def score_multiple(self, stock_data: Dict[str, pd.DataFrame]) -> Dict[str, float]:
+        """
+        Score multiple stocks.
+
+        Args:
+            stock_data: Dictionary of stock DataFrames with features.
+
+        Returns:
+            Dictionary of stock scores.
+        """
+        scores = {}
+        for symbol, data in stock_data.items():
+            scores[symbol] = self.predict(data)
+        return scores
+
         """
         Save model to disk.
 

@@ -495,8 +495,8 @@ class PatternRecognitionModel:
             class CustomCNN(nn.Module):
                 def __init__(self, input_channels, num_classes, lookback):
                     super().__init__()
-                    # Force input_channels to 5 and num_classes to 9 to match the saved model
-                    self.conv1 = nn.Conv1d(5, 32, kernel_size=3, padding=1)
+                    # Adjust input_channels to match the dataset
+                    self.conv1 = nn.Conv1d(53, 32, kernel_size=3, padding=1)
                     self.bn1 = nn.BatchNorm1d(32)
                     self.conv2 = nn.Conv1d(32, 64, kernel_size=3, padding=1)
                     self.bn2 = nn.BatchNorm1d(64)

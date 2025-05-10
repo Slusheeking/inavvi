@@ -769,6 +769,24 @@ class DataFetcher:
         return price_data, news_data
 
 
+def fetch_data(symbols: List[str] = None, timeframe: str = "1d", data_days: int = 365) -> Dict[str, pd.DataFrame]:
+    """
+    Fetches historical price data using the DataFetcher class.
+
+    Args:
+        symbols: List of stock symbols to fetch.
+        timeframe: Timeframe for the data (1d, 1h, etc.).
+        data_days: Number of days of historical data to fetch.
+
+    Returns:
+        Dictionary of DataFrames with historical price data.
+    """
+    fetcher = DataFetcher(data_days=data_days)
+    if not symbols:
+        symbols = fetcher.get_universe() # Get default universe if none provided
+    return fetcher.fetch_historical_data(symbols=symbols, timeframe=timeframe)
+
+
 def main():
     """
     Main function to demonstrate data fetching.

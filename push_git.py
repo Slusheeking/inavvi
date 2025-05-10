@@ -49,7 +49,7 @@ def main():
 
         # Push changes
         print("\n--- Pushing to Remote Repository ---")
-        run_command("git push")
+        run_command("git push origin main")  # Ensure to push to the correct branch
 
         print("\n--- Git Operations Completed Successfully ---")
 
