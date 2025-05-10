@@ -17,8 +17,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader, Dataset, random_split
-import cudf
-import cuml
 
 import optuna
 from src.config.settings import settings
@@ -31,12 +29,7 @@ logger = setup_logger("pattern_recognition")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"Using device: {device}")
 
-# Enable RAPIDS acceleration for pandas operations where possible
-try:
-    cudf.pandas_accelerator()
-    logger.info("RAPIDS pandas accelerator enabled")
-except Exception as e:
-    logger.warning(f"Could not enable RAPIDS pandas accelerator: {e}")
+# Use PyTorch GPU capabilities directly without RAPIDS
 
 # Pattern definitions
 PATTERN_CLASSES = [
@@ -138,89 +131,39 @@ class OHLCVDataset(Dataset):
             logger.warning("Missing required OHLCV columns, skipping technical indicators")
             return df
             
-        try:
-            # Try to use GPU acceleration with cuDF
-            import cudf
-            gpu_df = cudf.DataFrame.from_pandas(df.copy())
-            
-            # Calculate technical indicators on GPU
-            gpu_df["returns"] = gpu_df["close"].pct_change()
-            for period in [5, 10, 20]:
-                gpu_df[f"ma_{period}"] = gpu_df["close"].rolling(window=period).mean()
-                gpu_df[f"ma_pos_{period}"] = (gpu_df["close"] - gpu_df[f"ma_{period}"]) / gpu_df[f"ma_{period}"]
-            gpu_df["ma_20"] = gpu_df["close"].rolling(window=20).mean()
-            gpu_df["stddev"] = gpu_df["close"].rolling(window=20).std()
-            gpu_df["bollinger_upper"] = gpu_df["ma_20"] + 2 * gpu_df["stddev"]
-            gpu_df["bollinger_lower"] = gpu_df["ma_20"] - 2 * gpu_df["stddev"]
-            gpu_df["bollinger_width"] = (gpu_df["bollinger_upper"] - gpu_df["bollinger_lower"]) / gpu_df["ma_20"]
-            gpu_df["bollinger_pos"] = (gpu_df["close"] - gpu_df["bollinger_lower"]) / (gpu_df["bollinger_upper"] - gpu_df["bollinger_lower"])
-            
-            delta = gpu_df["close"].diff()
-            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-            loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-            rs = gain / loss
-            gpu_df["rsi"] = 100 - (100 / (1 + rs))
-            
-            ema_12 = gpu_df["close"].ewm(span=12, adjust=False).mean()
-            ema_26 = gpu_df["close"].ewm(span=26, adjust=False).mean()
-            gpu_df["macd"] = ema_12 - ema_26
-            gpu_df["macd_signal"] = gpu_df["macd"].ewm(span=9, adjust=False).mean()
-            gpu_df["macd_hist"] = gpu_df["macd"] - gpu_df["macd_signal"]
-            
-            gpu_df["atr"] = gpu_df["high"] - gpu_df["low"]
-            gpu_df["atr_pct"] = gpu_df["atr"] / gpu_df["close"]
-            gpu_df["volume_ma_10"] = gpu_df["volume"].rolling(window=10).mean()
-            gpu_df["volume_ratio"] = gpu_df["volume"] / gpu_df["volume_ma_10"]
-            
-            # For operations that might not be directly supported in cuDF
-            gpu_df["body"] = (gpu_df["close"] - gpu_df["open"]).abs()
-            gpu_df["body_pct"] = gpu_df["body"] / gpu_df["open"]
-            
-            # Convert back to pandas for operations not well supported in cuDF
-            df = gpu_df.to_pandas()
-            df["upper_shadow"] = df["high"] - df[["open", "close"]].max(axis=1)
-            df["lower_shadow"] = df[["open", "close"]].min(axis=1) - df["low"]
-            df["is_bullish"] = (df["close"] > df["open"]).astype(float)
-            df.fillna(0, inplace=True)
-            
-            logger.debug("Used GPU acceleration for technical indicators")
-            return df
-            
-        except (ImportError, Exception) as e:
-            # Fall back to pandas if cuDF fails
-            logger.warning(f"GPU acceleration failed, falling back to pandas: {e}")
-            df = df.copy()
-            df["returns"] = df["close"].pct_change()
-            for period in [5, 10, 20]:
-                df[f"ma_{period}"] = df["close"].rolling(window=period).mean()
-                df[f"ma_pos_{period}"] = (df["close"] - df[f"ma_{period}"]) / df[f"ma_{period}"]
-            df["ma_20"] = df["close"].rolling(window=20).mean()
-            df["stddev"] = df["close"].rolling(window=20).std()
-            df["bollinger_upper"] = df["ma_20"] + 2 * df["stddev"]
-            df["bollinger_lower"] = df["ma_20"] - 2 * df["stddev"]
-            df["bollinger_width"] = (df["bollinger_upper"] - df["bollinger_lower"]) / df["ma_20"]
-            df["bollinger_pos"] = (df["close"] - df["bollinger_lower"]) / (df["bollinger_upper"] - df["bollinger_lower"])
-            delta = df["close"].diff()
-            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-            loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-            rs = gain / loss
-            df["rsi"] = 100 - (100 / (1 + rs))
-            ema_12 = df["close"].ewm(span=12, adjust=False).mean()
-            ema_26 = df["close"].ewm(span=26, adjust=False).mean()
-            df["macd"] = ema_12 - ema_26
-            df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-            df["macd_hist"] = df["macd"] - df["macd_signal"]
-            df["atr"] = df["high"] - df["low"]
-            df["atr_pct"] = df["atr"] / df["close"]
-            df["volume_ma_10"] = df["volume"].rolling(window=10).mean()
-            df["volume_ratio"] = df["volume"] / df["volume_ma_10"]
-            df["body"] = abs(df["close"] - df["open"])
-            df["body_pct"] = df["body"] / df["open"]
-            df["upper_shadow"] = df["high"] - df[["open", "close"]].max(axis=1)
-            df["lower_shadow"] = df[["open", "close"]].min(axis=1) - df["low"]
-            df["is_bullish"] = (df["close"] > df["open"]).astype(float)
-            df.fillna(0, inplace=True)
-            return df
+        # CPU implementation with pandas
+        df = df.copy()
+        df["returns"] = df["close"].pct_change()
+        for period in [5, 10, 20]:
+            df[f"ma_{period}"] = df["close"].rolling(window=period).mean()
+            df[f"ma_pos_{period}"] = (df["close"] - df[f"ma_{period}"]) / df[f"ma_{period}"]
+        df["ma_20"] = df["close"].rolling(window=20).mean()
+        df["stddev"] = df["close"].rolling(window=20).std()
+        df["bollinger_upper"] = df["ma_20"] + 2 * df["stddev"]
+        df["bollinger_lower"] = df["ma_20"] - 2 * df["stddev"]
+        df["bollinger_width"] = (df["bollinger_upper"] - df["bollinger_lower"]) / df["ma_20"]
+        df["bollinger_pos"] = (df["close"] - df["bollinger_lower"]) / (df["bollinger_upper"] - df["bollinger_lower"])
+        delta = df["close"].diff()
+        gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+        loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+        rs = gain / loss
+        df["rsi"] = 100 - (100 / (1 + rs))
+        ema_12 = df["close"].ewm(span=12, adjust=False).mean()
+        ema_26 = df["close"].ewm(span=26, adjust=False).mean()
+        df["macd"] = ema_12 - ema_26
+        df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+        df["macd_hist"] = df["macd"] - df["macd_signal"]
+        df["atr"] = df["high"] - df["low"]
+        df["atr_pct"] = df["atr"] / df["close"]
+        df["volume_ma_10"] = df["volume"].rolling(window=10).mean()
+        df["volume_ratio"] = df["volume"] / df["volume_ma_10"]
+        df["body"] = abs(df["close"] - df["open"])
+        df["body_pct"] = df["body"] / df["open"]
+        df["upper_shadow"] = df["high"] - df[["open", "close"]].max(axis=1)
+        df["lower_shadow"] = df[["open", "close"]].min(axis=1) - df["low"]
+        df["is_bullish"] = (df["close"] > df["open"]).astype(float)
+        df.fillna(0, inplace=True)
+        return df
 
     def _normalize_sample(self, df: pd.DataFrame) -> np.ndarray:
         """
@@ -232,87 +175,37 @@ class OHLCVDataset(Dataset):
         Returns:
             Normalized data as numpy array.
         """
-        try:
-            # Try to use GPU acceleration
-            import cudf
-            import cupy as cp
+        price_cols = ["open", "high", "low", "close"]
+        derived_cols = [col for col in df.columns if col not in price_cols + ["volume"]]
+        price_data = df[price_cols].values
+        volume_data = df[["volume"]].values if "volume" in df.columns else np.zeros((len(df), 1))
+        derived_data = df[derived_cols].values if derived_cols else np.zeros((len(df), 0))
+        
+        if self.normalize_method == "minmax":
+            price_min = np.min(price_data[:, 2])
+            price_max = np.max(price_data[:, 1])
+            price_range = max(price_max - price_min, 1e-8)
+            norm_price_data = (price_data - price_min) / price_range
+        elif self.normalize_method == "zscore":
+            price_mean = np.mean(price_data[:, 3])
+            price_std = np.std(price_data[:, 3]) or 1.0
+            norm_price_data = (price_data - price_mean) / price_std
+        elif self.normalize_method == "percentchange":
+            base_price = price_data[0, 3]
+            if base_price == 0:
+                base_price = 1.0
+            norm_price_data = price_data / base_price - 1.0
+        else:
+            price_min = np.min(price_data[:, 2])
+            price_max = np.max(price_data[:, 1])
+            price_range = max(price_max - price_min, 1e-8)
+            norm_price_data = (price_data - price_min) / price_range
             
-            # Convert to GPU
-            gpu_df = cudf.DataFrame.from_pandas(df)
-            
-            price_cols = ["open", "high", "low", "close"]
-            derived_cols = [col for col in df.columns if col not in price_cols + ["volume"]]
-            
-            # Extract data as cupy arrays
-            price_data = cp.array(gpu_df[price_cols].values)
-            volume_data = cp.array(gpu_df[["volume"]].values) if "volume" in gpu_df.columns else cp.zeros((len(gpu_df), 1))
-            derived_data = cp.array(gpu_df[derived_cols].values) if derived_cols else cp.zeros((len(gpu_df), 0))
-            
-            if self.normalize_method == "minmax":
-                price_min = cp.min(price_data[:, 2])
-                price_max = cp.max(price_data[:, 1])
-                price_range = max(price_max - price_min, 1e-8)
-                norm_price_data = (price_data - price_min) / price_range
-            elif self.normalize_method == "zscore":
-                price_mean = cp.mean(price_data[:, 3])
-                price_std = cp.std(price_data[:, 3]) or 1.0
-                norm_price_data = (price_data - price_mean) / price_std
-            elif self.normalize_method == "percentchange":
-                base_price = price_data[0, 3]
-                if base_price == 0:
-                    base_price = 1.0
-                norm_price_data = price_data / base_price - 1.0
-            else:
-                price_min = cp.min(price_data[:, 2])
-                price_max = cp.max(price_data[:, 1])
-                price_range = max(price_max - price_min, 1e-8)
-                norm_price_data = (price_data - price_min) / price_range
-                
-            vol_max = cp.max(volume_data) if cp.max(volume_data) > 0 else 1.0
-            norm_volume_data = volume_data / vol_max
-            
-            # Combine data
-            combined_data = cp.vstack([norm_price_data.T, norm_volume_data.T, derived_data.T])
-            
-            # Convert back to numpy for PyTorch
-            logger.debug("Used GPU acceleration for normalization")
-            return cp.asnumpy(combined_data)
-            
-        except (ImportError, Exception) as e:
-            # Fall back to numpy if GPU acceleration fails
-            logger.warning(f"GPU normalization failed, falling back to numpy: {e}")
-            
-            price_cols = ["open", "high", "low", "close"]
-            derived_cols = [col for col in df.columns if col not in price_cols + ["volume"]]
-            price_data = df[price_cols].values
-            volume_data = df[["volume"]].values if "volume" in df.columns else np.zeros((len(df), 1))
-            derived_data = df[derived_cols].values if derived_cols else np.zeros((len(df), 0))
-            
-            if self.normalize_method == "minmax":
-                price_min = np.min(price_data[:, 2])
-                price_max = np.max(price_data[:, 1])
-                price_range = max(price_max - price_min, 1e-8)
-                norm_price_data = (price_data - price_min) / price_range
-            elif self.normalize_method == "zscore":
-                price_mean = np.mean(price_data[:, 3])
-                price_std = np.std(price_data[:, 3]) or 1.0
-                norm_price_data = (price_data - price_mean) / price_std
-            elif self.normalize_method == "percentchange":
-                base_price = price_data[0, 3]
-                if base_price == 0:
-                    base_price = 1.0
-                norm_price_data = price_data / base_price - 1.0
-            else:
-                price_min = np.min(price_data[:, 2])
-                price_max = np.max(price_data[:, 1])
-                price_range = max(price_max - price_min, 1e-8)
-                norm_price_data = (price_data - price_min) / price_range
-                
-            vol_max = np.max(volume_data) if np.max(volume_data) > 0 else 1.0
-            norm_volume_data = volume_data / vol_max
-            
-            combined_data = np.vstack([norm_price_data.T, norm_volume_data.T, derived_data.T])
-            return combined_data
+        vol_max = np.max(volume_data) if np.max(volume_data) > 0 else 1.0
+        norm_volume_data = volume_data / vol_max
+        
+        combined_data = np.vstack([norm_price_data.T, norm_volume_data.T, derived_data.T])
+        return combined_data
 
 
 class PositionalEncoding(nn.Module):

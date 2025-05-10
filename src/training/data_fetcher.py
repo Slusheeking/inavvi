@@ -6,7 +6,7 @@ This module provides functionality for fetching financial data:
 - Financial news data from various sources
 - Market data for sentiment analysis and other models
 - Data persistence in Redis and TimescaleDB
-- GPU acceleration with RAPIDS when available
+- Support for GPU-accelerated models through PyTorch
 """
 
 import os
@@ -25,20 +25,8 @@ from pathlib import Path
 from typing import Dict, List, Union, Any, Optional, Tuple
 from dotenv import load_dotenv
 
-# Try to import RAPIDS libraries for GPU acceleration
-try:
-    import cudf
-    import cupy as cp
-    from cuml.preprocessing import StandardScaler as CuStandardScaler
-    RAPIDS_AVAILABLE = True
-    # Enable pandas accelerator if available
-    try:
-        cudf.pandas_accelerator()
-        logging.info("RAPIDS pandas accelerator enabled for data_fetcher")
-    except Exception as e:
-        logging.warning(f"Could not enable RAPIDS pandas accelerator: {e}")
-except ImportError:
-    RAPIDS_AVAILABLE = False
+# GPU acceleration (without RAPIDS)
+RAPIDS_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(

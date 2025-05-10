@@ -18,7 +18,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import networkx as nx
 import numpy as np
 import pandas as pd
-import spacy
+import nltk
+from nltk import word_tokenize, pos_tag, ne_chunk
+from nltk.chunk import tree2conlltags
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -292,17 +294,18 @@ class FinancialSentimentModel:
         if entity_extraction:
             self.entity_tracker = EntitySentimentTracker()
             try:
-                self.nlp = spacy.load("en_core_web_sm")
-                logger.info("Loaded spaCy NER model")
-            except:
-                logger.warning("Failed to load spaCy. Attempting to download smaller model...")
-                try:
-                    subprocess.call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
-                    self.nlp = spacy.load("en_core_web_sm")
-                    logger.info("Successfully downloaded and loaded spaCy NER model")
-                except Exception as e:
-                    logger.error(f"Failed to load spaCy for entity extraction: {e}")
-                    self.nlp = None
+                # Ensure NLTK data is downloaded
+                nltk.download('punkt')
+                nltk.download('averaged_perceptron_tagger')
+                nltk.download('maxent_ne_chunker')
+                nltk.download('words')
+                nltk.download('averaged_perceptron_tagger_eng')
+                nltk.download('maxent_ne_chunker_tab')
+                logger.info("NLTK resources loaded for NER")
+                self.nlp = True  # Just a flag to indicate NLP is available
+            except Exception as e:
+                logger.error(f"Failed to load NLTK resources for entity extraction: {e}")
+                self.nlp = None
         else:
             self.entity_tracker = None
             self.nlp = None
@@ -568,7 +571,7 @@ class FinancialSentimentModel:
 
     def extract_entities(self, text: str) -> List[Dict]:
         """
-        Extract named entities from text.
+        Extract named entities from text using NLTK.
 
         Args:
             text: Input text.
@@ -577,27 +580,78 @@ class FinancialSentimentModel:
             List of entity dictionaries with type and text.
         """
         if not self.nlp:
-            logger.warning("No spaCy model available for entity extraction")
+            logger.warning("NLTK resources not available for entity extraction")
             return []
         try:
-            doc = self.nlp(text)
+            # Tokenize, POS tag, and perform NER
+            tokens = word_tokenize(text)
+            pos_tags = pos_tag(tokens)
+            ne_tree = ne_chunk(pos_tags)
+            
+            # Convert the tree to a format we can process
+            iob_tags = tree2conlltags(ne_tree)
+            
             entities = []
-            for ent in doc.ents:
-                entity_type = {
-                    "ORG": "company",
-                    "PERSON": "person",
-                    "GPE": "location",
-                    "LOC": "location",
-                    "PRODUCT": "product",
-                    "MONEY": "financial",
-                    "PERCENT": "financial",
-                }.get(ent.label_, "other")
-                if ent.text.lower() in self.entity_dict:
-                    entity_type = self.entity_dict[ent.text.lower()]
-                entities.append({"text": ent.text, "type": entity_type, "start": ent.start_char, "end": ent.end_char})
+            current_entity = {"text": "", "type": "", "start": 0, "end": 0}
+            in_entity = False
+            char_index = 0
+            
+            # Process the IOB tags to extract entities
+            for word, pos, tag in iob_tags:
+                # Skip punctuation for character index calculation
+                if word in ",.;:!?()[]{}\"'":
+                    char_index += len(word) + 1  # +1 for space
+                    continue
+                
+                if tag.startswith('B-'):  # Beginning of entity
+                    if in_entity:  # If we were already tracking an entity, add it to the list
+                        current_entity["end"] = char_index - 1
+                        entities.append(current_entity.copy())
+                    
+                    # Start a new entity
+                    entity_type = tag[2:]  # Remove 'B-' prefix
+                    mapped_type = {
+                        "ORGANIZATION": "company",
+                        "PERSON": "person",
+                        "GPE": "location",
+                        "LOCATION": "location",
+                        "PRODUCT": "product",
+                        "MONEY": "financial",
+                        "PERCENT": "financial",
+                    }.get(entity_type, "other")
+                    
+                    # Check custom entity dictionary
+                    if word.lower() in self.entity_dict:
+                        mapped_type = self.entity_dict[word.lower()]
+                    
+                    current_entity = {
+                        "text": word,
+                        "type": mapped_type,
+                        "start": char_index,
+                        "end": 0  # Will be set when entity ends
+                    }
+                    in_entity = True
+                
+                elif tag.startswith('I-'):  # Inside of entity
+                    if in_entity:
+                        current_entity["text"] += " " + word
+                
+                else:  # Outside of entity (O tag)
+                    if in_entity:
+                        current_entity["end"] = char_index - 1
+                        entities.append(current_entity.copy())
+                        in_entity = False
+                
+                char_index += len(word) + 1  # +1 for space
+            
+            # Add the last entity if we were tracking one
+            if in_entity:
+                current_entity["end"] = char_index - 1
+                entities.append(current_entity)
+            
             return entities
         except Exception as e:
-            logger.error(f"Error extracting entities: {e}")
+            logger.error(f"Error extracting entities with NLTK: {e}")
             return []
 
     def analyze_sentiment(self, text: str, extract_entities: Optional[bool] = None) -> Dict[str, Any]:
