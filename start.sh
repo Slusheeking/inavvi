@@ -19,8 +19,8 @@ echo -e "${NC}"
 python_version=$(python3 --version)
 echo -e "${BLUE}Using ${python_version}${NC}"
 
-# Use the virtual environment located at trading_system/venv
-VENV_PATH="venv"
+# Use the virtual environment located at .venv
+VENV_PATH=".venv"
 if [ -d "$VENV_PATH" ]; then
     echo -e "${GREEN}Using virtual environment...${NC}"
     source $VENV_PATH/bin/activate

@@ -19,8 +19,6 @@ data/
 logs/
 *.log
 
-# Model files
-models/
 
 # Test coverage
 .coverage
