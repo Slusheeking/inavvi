@@ -154,7 +154,7 @@ class TradeExecutor:
             raise
 
         # Validate trading mode
-        self.trading_mode = settings.trading_mode
+        self.trading_mode = settings.trading.trading_mode
         logger.info(f"Trading mode: {self.trading_mode}")
 
         # Check for any pending orders

@@ -8,16 +8,16 @@ providers and models based on the task type and other criteria.
 import json
 import os
 import sys
-import time
 from typing import Any, Dict, List, Optional
 
-import aiohttp
+from openai import AsyncOpenAI
 
 # Add the project root directory to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from src.config.settings import settings
 from src.utils.logging import setup_logger
+from src.metrics.ml_metrics import get_collector, MetricsTimer
 
 # Set up logger
 logger = setup_logger("llm_router")
@@ -25,11 +25,8 @@ logger = setup_logger("llm_router")
 
 class OpenRouterClient:
     """
-    Client for OpenRouter API.
+    Client for OpenRouter API using OpenAI SDK.
     """
-
-    # Base URL for OpenRouter API
-    BASE_URL = "https://openrouter.ai/api/v1"
 
     def __init__(self, api_key: Optional[str] = None):
         """
@@ -39,29 +36,22 @@ class OpenRouterClient:
             api_key: OpenRouter API key
         """
         self.api_key = api_key or settings.api.openrouter_api_key
-        self.session = None
+        
+        # Create OpenAI client with OpenRouter base URL
+        self.client = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=self.api_key
+        )
 
         # Default model
         self.default_model = settings.llm.model
 
         logger.info(f"OpenRouter client initialized with default model: {self.default_model}")
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """
-        Get or create an aiohttp session.
-
-        Returns:
-            aiohttp.ClientSession: The session
-        """
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
-        return self.session
-
     async def close(self):
-        """Close the aiohttp session."""
-        if self.session and not self.session.closed:
-            await self.session.close()
-            logger.info("OpenRouter session closed")
+        """Close the client session."""
+        # The AsyncOpenAI client handles session cleanup automatically
+        logger.info("OpenRouter session closed")
 
     async def chat_completion(
         self,
@@ -72,7 +62,7 @@ class OpenRouterClient:
         stream: bool = False,
     ) -> Dict[str, Any]:
         """
-        Get chat completion from OpenRouter API.
+        Get chat completion from OpenRouter API using OpenAI SDK.
 
         Args:
             messages: List of message dictionaries
@@ -89,48 +79,45 @@ class OpenRouterClient:
         temperature = temperature or settings.llm.temperature
         max_tokens = max_tokens or settings.llm.max_tokens
 
-        # Prepare request data
-        data = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": stream,
-        }
-
-        # Prepare headers
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-            "HTTP-Referer": "https://trading-system.com",  # Replace with your domain
-            "X-Title": settings.app_name,
-        }
-
         try:
-            # Get session
-            session = await self._get_session()
-
-            # Make request
-            url = f"{self.BASE_URL}/chat/completions"
-            start_time = time.time()
-
-            async with session.post(url, json=data, headers=headers) as response:
-                elapsed_time = time.time() - start_time
-
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"Error {response.status} from OpenRouter: {error_text}")
-                    return {"error": error_text}
-
-                # Handle streaming responses
-                if stream:
-                    return response  # Return the response object for streaming
-
-                # Parse response
-                result = await response.json()
-
-                logger.info(f"OpenRouter request completed in {elapsed_time:.2f}s")
-                return result
+            # Use metrics timer to measure request latency
+            with MetricsTimer("llm_router", "api_request"):
+                response = await self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=stream,
+                    extra_headers={
+                        "HTTP-Referer": "https://trading-system.com",  # Replace with your domain
+                        "X-Title": settings.app_name,
+                    }
+                )
+            
+            # Convert the response to a dictionary for compatibility with existing code
+            if stream:
+                return response  # Return the streaming response object
+            else:
+                # Convert Pydantic model to dict
+                response_dict = {
+                    "id": response.id,
+                    "object": response.object,
+                    "created": response.created,
+                    "model": response.model,
+                    "choices": [
+                        {
+                            "index": choice.index,
+                            "message": {
+                                "role": choice.message.role,
+                                "content": choice.message.content
+                            },
+                            "finish_reason": choice.finish_reason
+                        }
+                        for choice in response.choices
+                    ]
+                }
+                return response_dict
+                
         except Exception as e:
             logger.error(f"Error calling OpenRouter API: {e}")
             return {"error": str(e)}
@@ -222,39 +209,60 @@ class OpenRouterClient:
 
         # Make request to OpenRouter
         messages = [system_message, user_message]
-        response = await self.chat_completion(messages)
-
-        # Parse response
+        
         try:
-            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            # Get metrics collector
+            metrics_collector = get_collector("llm_trade_decision")
+            # Use metrics timer to measure the entire process
+            with MetricsTimer("llm_trade_decision", "full_process"):
+                # Use the OpenAI SDK to make the request
+                response = await self.chat_completion(messages)
+                
+                # Parse response
+                content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # Extract JSON
-            if "{" in content and "}" in content:
-                json_str = content[content.find("{") : content.rfind("}") + 1]
-                decision = json.loads(json_str)
-            else:
-                # If no JSON found, create a basic response
-                decision = {
-                    "decision": "no_trade",
-                    "position_size": 0.0,
-                    "confidence": 0.0,
-                    "reasoning": "Failed to parse LLM response",
-                    "key_factors": [],
-                }
+                # Extract JSON
+                if "{" in content and "}" in content:
+                    json_str = content[content.find("{") : content.rfind("}") + 1]
+                    decision = json.loads(json_str)
+                else:
+                    # If no JSON found, create a basic response
+                    decision = {
+                        "decision": "no_trade",
+                        "position_size": 0.0,
+                        "confidence": 0.0,
+                        "reasoning": "Failed to parse LLM response",
+                        "key_factors": [],
+                    }
 
-            # Add raw response for debugging
-            decision["raw_response"] = content
+                # Add raw response for debugging
+                decision["raw_response"] = content
+                
+                # Record confidence metric
+                metrics_collector.record_confidence(
+                    confidence=decision.get("confidence", 0.0),
+                    correct=True,  # We don't know if it's correct in real-time
+                    prediction_type="trade_decision"
+                )
 
             return decision
         except Exception as e:
             logger.error(f"Error parsing LLM response: {e}")
+            
+            # Record error in metrics
+            metrics_collector.record_error(
+                error_type="LLMResponseParsingError",
+                error_message=str(e),
+                context={"model": self.default_model}
+            )
+            
             return {
                 "decision": "no_trade",
                 "position_size": 0.0,
                 "confidence": 0.0,
                 "reasoning": f"Error: {str(e)}",
                 "key_factors": [],
-                "raw_response": response,
+                "raw_response": str(e),
             }
 
     async def get_exit_decision(
@@ -346,39 +354,61 @@ class OpenRouterClient:
 
         # Make request to OpenRouter
         messages = [system_message, user_message]
-        response = await self.chat_completion(messages)
-
-        # Parse response
+        
+        # Get metrics collector
+        metrics_collector = get_collector("llm_exit_decision")
+        
         try:
-            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            # Use metrics timer to measure the entire process
+            with MetricsTimer("llm_exit_decision", "full_process"):
+                # Use the OpenAI SDK to make the request
+                response = await self.chat_completion(messages)
+                
+                # Parse response
+                content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # Extract JSON
-            if "{" in content and "}" in content:
-                json_str = content[content.find("{") : content.rfind("}") + 1]
-                decision = json.loads(json_str)
-            else:
-                # If no JSON found, create a basic response
-                decision = {
-                    "decision": "hold",
-                    "exit_size": 0.0,
-                    "confidence": 0.0,
-                    "reasoning": "Failed to parse LLM response",
-                    "key_factors": [],
-                }
+                # Extract JSON
+                if "{" in content and "}" in content:
+                    json_str = content[content.find("{") : content.rfind("}") + 1]
+                    decision = json.loads(json_str)
+                else:
+                    # If no JSON found, create a basic response
+                    decision = {
+                        "decision": "hold",
+                        "exit_size": 0.0,
+                        "confidence": 0.0,
+                        "reasoning": "Failed to parse LLM response",
+                        "key_factors": [],
+                    }
 
-            # Add raw response for debugging
-            decision["raw_response"] = content
+                # Add raw response for debugging
+                decision["raw_response"] = content
+                
+                # Record confidence metric
+                metrics_collector.record_confidence(
+                    confidence=decision.get("confidence", 0.0),
+                    correct=True,  # We don't know if it's correct in real-time
+                    prediction_type="exit_decision"
+                )
 
             return decision
         except Exception as e:
             logger.error(f"Error parsing LLM response: {e}")
+            
+            # Record error in metrics
+            metrics_collector.record_error(
+                error_type="LLMResponseParsingError",
+                error_message=str(e),
+                context={"model": self.default_model}
+            )
+            
             return {
                 "decision": "hold",
                 "exit_size": 0.0,
                 "confidence": 0.0,
                 "reasoning": f"Error: {str(e)}",
                 "key_factors": [],
-                "raw_response": response,
+                "raw_response": str(e),
             }
 
     async def get_market_analysis(
@@ -402,22 +432,44 @@ class OpenRouterClient:
             market_data=market_data, market_context=market_context
         )
 
-        # Make request to OpenRouter
-        response = await self.chat_completion(messages)
-
-        # Parse response
+        # Get metrics collector
+        metrics_collector = get_collector("llm_market_analysis")
+        
         try:
-            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            return parse_market_analysis(content)
+            # Use metrics timer to measure the entire process
+            with MetricsTimer("llm_market_analysis", "full_process"):
+                # Use the OpenAI SDK to make the request
+                response = await self.chat_completion(messages)
+                
+                # Parse response
+                content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+                analysis = parse_market_analysis(content)
+                
+                # Record confidence metric
+                metrics_collector.record_confidence(
+                    confidence=analysis.get("confidence", 0.0),
+                    correct=True,  # We don't know if it's correct in real-time
+                    prediction_type="market_analysis"
+                )
+                
+                return analysis
         except Exception as e:
             logger.error(f"Error processing market analysis response: {e}")
+            
+            # Record error in metrics
+            metrics_collector.record_error(
+                error_type="MarketAnalysisError",
+                error_message=str(e),
+                context={"model": self.default_model}
+            )
+            
             return {
                 "market_regime": "uncertain",
                 "confidence": 0.0,
                 "reasoning": f"Error: {str(e)}",
                 "key_indicators": [],
                 "trading_recommendation": "Proceed with caution",
-                "raw_response": response,
+                "raw_response": str(e),
             }
 
 
@@ -544,7 +596,7 @@ class LLMRouter:
         exit_signals: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Get exit decision from appropriate LLM.
+        Get exit decision from LLM.
 
         Args:
             position_data: Data for the current position
@@ -564,7 +616,7 @@ class LLMRouter:
         self, market_data: Dict[str, Any], market_context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Get market analysis from appropriate LLM.
+        Get market analysis from LLM.
 
         Args:
             market_data: Dictionary containing market data

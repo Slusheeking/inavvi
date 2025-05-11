@@ -3,7 +3,7 @@ Alpha Vantage API client for fetching market data, fundamentals, and news.
 """
 
 import asyncio
-import os
+import functools
 import sys
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -55,7 +55,6 @@ class AlphaVantageInvalidParameterError(AlphaVantageDataError):
 
 
 # Simple retry decorator for Alpha Vantage requests
-import functools
 
 
 def retry_av(attempts=3, delay=1):
@@ -1223,9 +1222,14 @@ class AlphaVantageAPI:
         try:
             data = await self._make_request(params)
 
-            if not data or len(data) <= 1:  # Metadata only
+            if not data:
                 logger.warning("No sector performance data found")
-                return None
+                return {}  # Return empty dict instead of None
+                
+            # Check if data is empty or only contains metadata
+            if len(data) <= 1:
+                logger.warning("Sector performance data only contains metadata")
+                return {}  # Return empty dict instead of None
 
             # Process sector data
             sectors = {}
@@ -1261,7 +1265,7 @@ class AlphaVantageAPI:
             # Validate that we have actual data
             if not sectors or all(len(time_data) == 0 for time_data in sectors.values()):
                 logger.warning("No valid sector performance data after processing")
-                return None
+                return {}  # Return empty dict instead of None
 
             # Cache in Redis (1 hour expiry)
             redis_client.set("market:sectors", sectors, expiry=3600)
@@ -1270,10 +1274,15 @@ class AlphaVantageAPI:
 
         except AlphaVantageInvalidParameterError as e:
             logger.error(f"Invalid parameter for sector performance: {e}")
-            return None
+            return {}  # Return empty dict instead of None
         except (AlphaVantageRateLimitError, AlphaVantageDataError, aiohttp.ClientError) as e:
             # These will be handled by the retry decorator
+            logger.error(f"Error fetching sector performance: {e}")
             raise e
+        except Exception as e:
+            # Catch any other unexpected errors
+            logger.error(f"Unexpected error in get_sector_performance: {e}")
+            return {}  # Return empty dict instead of None
 
     # ---------- Cleanup ----------
 

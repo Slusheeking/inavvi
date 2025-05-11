@@ -3,7 +3,8 @@ Polygon API client for fetching market data.
 """
 
 import asyncio
-import os
+import functools
+import random
 import sys
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -56,8 +57,6 @@ class PolygonInvalidResponseError(PolygonDataError):
 
 
 # Retry decorator with exponential backoff
-import functools
-import random
 
 
 def retry_async(attempts=3, delay=1, backoff=2):
@@ -133,34 +132,129 @@ class PolygonAPI:
             Stock snapshot data if successful, None otherwise
         """
         try:
-            snapshot = self.rest_client.get_snapshot(ticker=symbol)
+            # Use the correct method for getting stock snapshots
+            try:
+                # Try to get the snapshot for the specific ticker
+                # The Polygon Python SDK has different methods for snapshots
+                try:
+                    # First try to get a specific ticker snapshot
+                    snapshot = None
+                    
+                    # Try using get_ticker_snapshot if available
+                    if hasattr(self.rest_client, "get_ticker_snapshot"):
+                        snapshot = self.rest_client.get_ticker_snapshot(symbol)
+                    # Try using get_snapshot_ticker if available
+                    elif hasattr(self.rest_client, "get_snapshot_ticker"):
+                        snapshot = self.rest_client.get_snapshot_ticker(symbol)
+                    # Try using list_tickers with the specific symbol
+                    elif hasattr(self.rest_client, "list_tickers"):
+                        tickers = list(self.rest_client.list_tickers(ticker=symbol, limit=1))
+                        if tickers and len(tickers) > 0:
+                            snapshot = tickers[0]
+                    # Try using get_snapshot_direction to get gainers/losers
+                    elif hasattr(self.rest_client, "get_snapshot_direction"):
+                        # This will get top gainers, but we'll need to filter for our symbol
+                        gainers = list(self.rest_client.get_snapshot_direction("stocks", direction="gainers"))
+                        snapshot = next((t for t in gainers if hasattr(t, "ticker") and t.ticker == symbol), None)
+                        
+                        if not snapshot:
+                            # Try losers if not found in gainers
+                            losers = list(self.rest_client.get_snapshot_direction("stocks", direction="losers"))
+                            snapshot = next((t for t in losers if hasattr(t, "ticker") and t.ticker == symbol), None)
+                    
+                except Exception as inner_e:
+                    logger.warning(f"Error using specific snapshot method for {symbol}: {inner_e}")
+                    snapshot = None
+                
+                if not snapshot:
+                    logger.warning(f"Could not find snapshot for {symbol} using available methods")
+                    return None
+                    
+            except Exception as e:
+                # Check if it's a 404 error
+                if "404" in str(e):
+                    logger.warning(f"Snapshot for {symbol} not found (404). Returning None.")
+                    return None
+                # Re-raise other exceptions
+                raise e
 
             # Process and return snapshot data
-            if snapshot and hasattr(snapshot, "ticker") and snapshot.ticker:
+            # Handle different snapshot formats based on which method was used
+            if snapshot:
+                # Initialize data dictionary
                 data = {
-                    "symbol": snapshot.ticker.ticker,
+                    "symbol": symbol,
                     "price": {
-                        "last": snapshot.ticker.last.price
-                        if hasattr(snapshot.ticker, "last") and snapshot.ticker.last
-                        else None,
-                        "open": snapshot.ticker.day.open
-                        if hasattr(snapshot.ticker, "day") and snapshot.ticker.day
-                        else None,
-                        "high": snapshot.ticker.day.high
-                        if hasattr(snapshot.ticker, "day") and snapshot.ticker.day
-                        else None,
-                        "low": snapshot.ticker.day.low
-                        if hasattr(snapshot.ticker, "day") and snapshot.ticker.day
-                        else None,
-                        "close": snapshot.ticker.prevDay.close
-                        if hasattr(snapshot.ticker, "prevDay") and snapshot.ticker.prevDay
-                        else None,
-                        "volume": snapshot.ticker.day.volume
-                        if hasattr(snapshot.ticker, "day") and snapshot.ticker.day
-                        else None,
+                        "last": None,
+                        "open": None,
+                        "high": None,
+                        "low": None,
+                        "close": None,
+                        "volume": None,
+                        "change_pct": None,
                     },
                     "timestamp": pd.Timestamp.now().isoformat(),
                 }
+                
+                # Extract data based on the structure of the snapshot
+                # Case 1: Standard ticker snapshot format
+                if hasattr(snapshot, "ticker") and hasattr(snapshot, "ticker") and snapshot.ticker:
+                    data["symbol"] = snapshot.ticker.ticker
+                    
+                    if hasattr(snapshot.ticker, "last") and snapshot.ticker.last:
+                        data["price"]["last"] = snapshot.ticker.last.price
+                        
+                    if hasattr(snapshot.ticker, "day") and snapshot.ticker.day:
+                        data["price"]["open"] = snapshot.ticker.day.open
+                        data["price"]["high"] = snapshot.ticker.day.high
+                        data["price"]["low"] = snapshot.ticker.day.low
+                        data["price"]["volume"] = snapshot.ticker.day.volume
+                        
+                    if hasattr(snapshot.ticker, "prevDay") and snapshot.ticker.prevDay:
+                        data["price"]["close"] = snapshot.ticker.prevDay.close
+                
+                # Case 2: Direct ticker snapshot format (from get_snapshot_direction)
+                elif hasattr(snapshot, "ticker"):
+                    data["symbol"] = snapshot.ticker
+                    
+                    # Handle todaysChange and todaysChangePerc
+                    if hasattr(snapshot, "todaysChange"):
+                        data["price"]["change"] = snapshot.todaysChange
+                    
+                    if hasattr(snapshot, "todaysChangePerc"):
+                        data["price"]["change_pct"] = snapshot.todaysChangePerc
+                    
+                    # Handle day data
+                    if hasattr(snapshot, "day") and snapshot.day:
+                        data["price"]["open"] = getattr(snapshot.day, "o", None)
+                        data["price"]["high"] = getattr(snapshot.day, "h", None)
+                        data["price"]["low"] = getattr(snapshot.day, "l", None)
+                        data["price"]["close"] = getattr(snapshot.day, "c", None)
+                        data["price"]["volume"] = getattr(snapshot.day, "v", None)
+                    
+                    # Handle lastTrade for last price
+                    if hasattr(snapshot, "lastTrade") and snapshot.lastTrade:
+                        data["price"]["last"] = getattr(snapshot.lastTrade, "p", None)
+                    
+                    # Handle prevDay for previous close
+                    if hasattr(snapshot, "prevDay") and snapshot.prevDay:
+                        data["price"]["close"] = getattr(snapshot.prevDay, "c", None)
+                
+                # Case 3: List tickers format
+                else:
+                    # Try to extract data from whatever format we have
+                    for attr in ["symbol", "ticker"]:
+                        if hasattr(snapshot, attr):
+                            data["symbol"] = getattr(snapshot, attr)
+                            break
+                    
+                    # Try to extract price data
+                    if hasattr(snapshot, "lastPrice"):
+                        data["price"]["last"] = snapshot.lastPrice
+                    elif hasattr(snapshot, "last_price"):
+                        data["price"]["last"] = snapshot.last_price
+                    elif hasattr(snapshot, "price"):
+                        data["price"]["last"] = snapshot.price
 
                 # Cache in Redis
                 redis_client.set_stock_data(symbol, data, "price")
@@ -393,8 +487,8 @@ class PolygonAPI:
             List of ticker information
         """
         try:
-            # Fetch all tickers
-            tickers = list(self.rest_client.get_tickers(type=type, market="stocks", active=active))
+            # Fetch all tickers - using list_tickers with correct parameter names
+            tickers = list(self.rest_client.list_tickers(type=type, market="stocks", active=active))
 
             # Extract relevant information
             universe = [
@@ -438,16 +532,29 @@ class PolygonAPI:
             if status and hasattr(status, "market"):
                 data = {"market": status.market, "server_time": status.server_time, "exchanges": {}}
 
+                # Handle exchanges differently as it's not directly iterable
                 if hasattr(status, "exchanges") and status.exchanges:
-                    for exchange in status.exchanges:
-                        data["exchanges"][exchange.name] = {
-                            "name": exchange.name,
-                            "type": exchange.type,
-                            "market": exchange.market,
-                            "status": exchange.status,
-                            "session_start": exchange.session_start,
-                            "session_end": exchange.session_end,
-                        }
+                    # Convert exchanges to a dictionary if it's not already
+                    exchanges_dict = {}
+                    
+                    # Try to access exchanges as attributes
+                    for attr_name in dir(status.exchanges):
+                        # Skip private attributes and methods
+                        if attr_name.startswith('_') or callable(getattr(status.exchanges, attr_name)):
+                            continue
+                            
+                        exchange = getattr(status.exchanges, attr_name)
+                        if exchange and hasattr(exchange, 'name'):
+                            exchanges_dict[exchange.name] = {
+                                "name": exchange.name,
+                                "type": getattr(exchange, "type", "unknown"),
+                                "market": getattr(exchange, "market", "unknown"),
+                                "status": getattr(exchange, "status", "unknown"),
+                                "session_start": getattr(exchange, "session_start", None),
+                                "session_end": getattr(exchange, "session_end", None),
+                            }
+                    
+                    data["exchanges"] = exchanges_dict
 
                 # Cache in Redis
                 redis_client.set("market:status", data, expiry=300)  # Expire after 5 minutes

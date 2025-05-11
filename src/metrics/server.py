@@ -24,6 +24,7 @@ if __name__ == "__main__":
 from src.config.settings import settings
 from src.utils.logging import setup_logger
 from src.utils.redis_client import redis_client
+from src.metrics.ml_metrics import get_all_metrics as get_all_ml_metrics
 
 # Set up logger
 logger = setup_logger("metrics_server")
@@ -249,17 +250,84 @@ async def get_market_info():
 @app.get("/performance")
 async def get_performance():
     """Get system performance metrics."""
-    # TODO: Implement performance tracking
+    # Get trading performance metrics
+    trades_today = 0
+    winning_trades = 0
+    losing_trades = 0
+    
+    # Get trade history from Redis
+    trade_history = redis_client.get("trades:history") or []
+    
+    # Calculate metrics if we have trade history
+    if trade_history:
+        # Filter for today's trades
+        today = datetime.now().date()
+        today_trades = [
+            t for t in trade_history
+            if datetime.fromisoformat(t.get("exit_time", t.get("entry_time", ""))).date() == today
+        ]
+        
+        trades_today = len(today_trades)
+        winning_trades = sum(1 for t in today_trades if t.get("realized_pnl", 0) > 0)
+        losing_trades = sum(1 for t in today_trades if t.get("realized_pnl", 0) < 0)
+        
+        # Calculate profit metrics
+        profits = [t.get("realized_pnl", 0) for t in today_trades if t.get("realized_pnl", 0) > 0]
+        losses = [abs(t.get("realized_pnl", 0)) for t in today_trades if t.get("realized_pnl", 0) < 0]
+        
+        win_rate = winning_trades / trades_today if trades_today > 0 else 0.0
+        avg_profit = sum(profits) / len(profits) if profits else 0.0
+        avg_loss = sum(losses) / len(losses) if losses else 0.0
+        profit_factor = sum(profits) / sum(losses) if sum(losses) > 0 else float('inf')
+    else:
+        win_rate = 0.0
+        avg_profit = 0.0
+        avg_loss = 0.0
+        profit_factor = 0.0
+    
     return {
-        "trades_today": 0,
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "win_rate": 0.0,
-        "avg_profit": 0.0,
-        "avg_loss": 0.0,
-        "profit_factor": 0.0,
+        "trades_today": trades_today,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "win_rate": win_rate,
+        "avg_profit": avg_profit,
+        "avg_loss": avg_loss,
+        "profit_factor": profit_factor,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.get("/ml_metrics")
+async def get_ml_metrics(time_window: Optional[int] = None):
+    """
+    Get ML model metrics.
+    
+    Args:
+        time_window: Optional time window in seconds to filter metrics
+        
+    Returns:
+        Dictionary with ML metrics for all models
+    """
+    return get_all_ml_metrics(time_window=time_window)
+
+
+@app.get("/ml_metrics/{model_name}")
+async def get_model_metrics(model_name: str, time_window: Optional[int] = None):
+    """
+    Get metrics for a specific ML model.
+    
+    Args:
+        model_name: Name of the model
+        time_window: Optional time window in seconds to filter metrics
+        
+    Returns:
+        Dictionary with metrics for the specified model
+    """
+    all_metrics = get_all_ml_metrics(time_window=time_window)
+    if model_name in all_metrics:
+        return all_metrics[model_name]
+    else:
+        return {"error": f"Model {model_name} not found"}
 
 
 @app.post("/control/start")

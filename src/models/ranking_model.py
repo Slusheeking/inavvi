@@ -570,7 +570,7 @@ class RankingModel:
         """
         # Check for cached predictions
         cache_key = None
-        if settings.use_redis_cache:
+        if settings.advanced.use_redis_cache:
             cache_key = f"ranking:predictions:{hash(features.to_json())}"
             cached_predictions = redis_client.get(cache_key)
             if cached_predictions is not None:
@@ -589,7 +589,7 @@ class RankingModel:
             predictions = torch.sigmoid(self.deep_model(X_tensor)).cpu().numpy().flatten()
         
         # Cache predictions
-        if settings.use_redis_cache and cache_key:
+        if settings.advanced.use_redis_cache and cache_key:
             redis_client.set(cache_key, predictions, ex=3600)  # Cache for 1 hour
         
         return predictions
@@ -760,11 +760,19 @@ class RankingModel:
             group_contributions[group] = group_contrib
         
         # Create explanation
+        # Get top positive and negative factors (limited to 5 each)
+        positive_factors = {k: v for k, v in sorted_contributions.items() if v > 0}
+        negative_factors = {k: v for k, v in sorted_contributions.items() if v < 0}
+        
+        # Take only the top 5 items
+        top_positive = dict(list(positive_factors.items())[:5])
+        top_negative = dict(list(negative_factors.items())[:5])
+        
         explanation = {
             "score": score,
             "percentile": int(score * 100),  # Simple percentile approximation
-            "top_positive_factors": {k: v for k, v in sorted_contributions.items() if v > 0}[:5],
-            "top_negative_factors": {k: v for k, v in sorted_contributions.items() if v < 0}[:5],
+            "top_positive_factors": top_positive,
+            "top_negative_factors": top_negative,
             "factor_groups": group_contributions
         }
         

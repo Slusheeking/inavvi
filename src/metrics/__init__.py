@@ -21,6 +21,8 @@ else:
         get_candidates,
         get_market_info,
         get_performance,
+        get_ml_metrics,
+        get_model_metrics,
         start_system,
         stop_system,
         restart_system,
@@ -28,8 +30,18 @@ else:
         PositionInfo,
         WatchlistItem,
     )
+    
+    from .ml_metrics import (
+        get_collector,
+        get_all_metrics,
+        MetricsTimer,
+        MLMetricsCollector,
+        MLMetricsRegistry,
+        metrics_registry,
+    )
 
     __all__ = [
+        # Server endpoints
         "app",
         "get_status",
         "get_positions",
@@ -37,10 +49,20 @@ else:
         "get_candidates",
         "get_market_info",
         "get_performance",
+        "get_ml_metrics",
+        "get_model_metrics",
         "start_system",
         "stop_system",
         "restart_system",
         "SystemStatus",
         "PositionInfo",
         "WatchlistItem",
+        
+        # ML metrics
+        "get_collector",
+        "get_all_metrics",
+        "MetricsTimer",
+        "MLMetricsCollector",
+        "MLMetricsRegistry",
+        "metrics_registry",
     ]

@@ -190,7 +190,9 @@ class FinancialSentimentModel:
         if entity_extraction:
             self.entity_tracker = EntitySentimentTracker()
             try:
+                # Download all required NLTK resources
                 nltk.download('punkt', quiet=True)
+                nltk.download('punkt_tab', quiet=True)
                 nltk.download('averaged_perceptron_tagger', quiet=True)
                 nltk.download('maxent_ne_chunker', quiet=True)
                 nltk.download('words', quiet=True)
@@ -503,6 +505,10 @@ class FinancialSentimentModel:
             cached_result = redis_client.get(cache_key)
             if cached_result:
                 logger.debug(f"Retrieved sentiment from cache for text: {text[:50]}...")
+                # Check if cached_result is already a dictionary (already deserialized by redis_client)
+                if isinstance(cached_result, dict):
+                    return cached_result
+                # Otherwise, try to deserialize it from JSON
                 return json.loads(cached_result)
         extract_entities = extract_entities if extract_entities is not None else self.entity_extraction
         sentiment_scores = self._get_sentiment_scores(text)
@@ -785,6 +791,22 @@ def analyze_sentiment(text: str, extract_entities: bool = True) -> Dict[str, Any
     if sentiment_model is None:
         logger.error("Sentiment model not available")
         return {"error": "Sentiment model not available"}
+    
+    # Check if result is cached
+    cache_key = f"sentiment:{hash(text)}"
+    cached_result = redis_client.get(cache_key)
+    if cached_result:
+        # Handle the case where cached_result is already a dict
+        if isinstance(cached_result, dict):
+            return cached_result
+        # Otherwise try to deserialize from JSON
+        try:
+            return json.loads(cached_result)
+        except (TypeError, json.JSONDecodeError):
+            # If deserialization fails, log and continue with fresh analysis
+            logger.warning("Failed to deserialize cached sentiment result")
+    
+    # Get fresh analysis
     return sentiment_model.analyze_sentiment(text, extract_entities=extract_entities)
 
 

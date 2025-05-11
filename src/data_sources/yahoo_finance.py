@@ -3,8 +3,9 @@ Yahoo Finance API client for fetching market data and financial information.
 """
 
 import asyncio
-import os
+import functools
 import sys
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -53,9 +54,6 @@ class YahooFinanceInvalidIntervalError(YahooFinanceDataError):
 
 
 # Simple retry decorator (can be enhanced with backoff strategies)
-import functools
-
-
 def retry(attempts=3, delay=1):
     def decorator(func):
         @functools.wraps(func)
@@ -95,13 +93,15 @@ class YahooFinanceAPI:
 
     def __init__(self):
         """Initialize the Yahoo Finance API client."""
-        self.rate_limit_delay = 0.2  # Seconds between requests to avoid rate limiting
+        self.rate_limit_delay = 2.0  # Increased from 0.2 to 2.0 seconds between requests to avoid rate limiting
+        self.last_request_time = 0  # Track the last request time
 
         logger.info("Yahoo Finance API client initialized")
 
     async def _run_in_threadpool(self, func, *args, **kwargs):
         """
         Run synchronous Yahoo Finance functions asynchronously in a thread pool.
+        Enforces rate limiting between requests to avoid API throttling.
 
         Args:
             func: Function to run
@@ -111,6 +111,18 @@ class YahooFinanceAPI:
         Returns:
             Function result
         """
+        # Enforce rate limiting
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_request_time
+        
+        if time_since_last_request < self.rate_limit_delay:
+            delay = self.rate_limit_delay - time_since_last_request
+            await asyncio.sleep(delay)
+        
+        # Update last request time
+        self.last_request_time = time.time()
+        
+        # Execute the function in a thread pool
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
@@ -294,8 +306,14 @@ class YahooFinanceAPI:
                 "cash_flow": cash_flow,
             }
 
-            # Check if any data was returned
-            if all(df.empty for df in financials.values()):
+            # Check if any data was returned - safely check for empty DataFrames
+            has_data = False
+            for df in financials.values():
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    has_data = True
+                    break
+                    
+            if not has_data:
                 logger.warning(f"No financial data found for {symbol}")
                 return None
 

@@ -7,7 +7,7 @@ in price data for trading signals.
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from src.config.settings import settings
 from src.utils.logging import setup_logger
 from src.utils.redis_client import redis_client
+from src.metrics.ml_metrics import get_collector, MetricsTimer
 
 # Set up logger
 logger = setup_logger("pattern_recognition")
@@ -212,7 +213,7 @@ class PatternRecognitionModel:
     Uses deep learning to identify chart patterns and provide trading signals.
     """
     
-    def __init__(self, model_path: Optional[str] = None, window_size: int = 50):
+    def __init__(self, model_path: Optional[str] = None, window_size: int = 40):
         """
         Initialize the pattern recognition model.
         
@@ -460,6 +461,15 @@ class PatternRecognitionModel:
                 self.metadata["metrics"] = self.metrics
                 self.metadata["last_updated"] = datetime.now().isoformat()
                 
+                # Record metrics in the ML metrics system
+                metrics_collector = get_collector("pattern_recognition")
+                metrics_collector.record_accuracy(
+                    accuracy=train_acc,
+                    precision=val_precision,
+                    recall=val_recall,
+                    f1=val_f1
+                )
+                
                 # Save model
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 save_path = os.path.join(settings.models_dir, f"pattern_model_{timestamp}.pt")
@@ -495,9 +505,19 @@ class PatternRecognitionModel:
         Returns:
             Dictionary with pattern predictions
         """
+        # Get metrics collector
+        metrics_collector = get_collector("pattern_recognition")
+        
         # Check if data is sufficient
         if len(ohlcv_data) < self.window_size:
             logger.warning(f"Data too short for prediction: {len(ohlcv_data)} < {self.window_size}")
+            
+            # Record error in metrics
+            metrics_collector.record_error(
+                error_type="InsufficientData",
+                error_message=f"Data too short for prediction: {len(ohlcv_data)} < {self.window_size}"
+            )
+            
             return {
                 "pattern": "none",
                 "confidence": 0.0,
@@ -507,58 +527,82 @@ class PatternRecognitionModel:
             }
         
         # Check if we should use cached result
-        if settings.use_redis_cache:
+        if settings.advanced.use_redis_cache:
             cache_key = f"pattern:{hash(ohlcv_data.iloc[-self.window_size:].to_json())}"
             cached_result = redis_client.get(cache_key)
             if cached_result:
                 logger.debug("Using cached pattern prediction")
                 return json.loads(cached_result)
-            
-        # Preprocess data
-        features = self._preprocess_data(ohlcv_data)
         
-        # Create sliding windows if needed
-        if len(features) > self.window_size:
-            # Use the most recent window
-            features = features[-self.window_size:]
-        
-        # Convert to tensor
-        features_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(device)
-        
-        # Make prediction
-        self.model.eval()
-        with torch.no_grad():
-            outputs = self.model(features_tensor)
-            probabilities = F.softmax(outputs, dim=1)[0]
-            confidence, predicted = torch.max(probabilities, 0)
+        # Use metrics timer to measure inference latency
+        with MetricsTimer("pattern_recognition", "inference"):
+            # Preprocess data
+            features = self._preprocess_data(ohlcv_data)
             
-            pattern_idx = predicted.item()
-            pattern_name = PATTERNS.get(pattern_idx, "none")
-            pattern_conf = confidence.item()
+            # Create sliding windows if needed
+            if len(features) > self.window_size:
+                # Use the most recent window
+                features = features[-self.window_size:]
             
-            # Check against threshold
-            if pattern_conf < threshold and pattern_idx != 0:
-                pattern_idx = 0
-                pattern_name = "none"
-                pattern_conf = 1.0 - pattern_conf
+            # Convert to tensor
+            features_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(device)
             
-            # Get additional pattern metadata
-            pattern_info = PATTERN_METADATA.get(pattern_name, {"bullish": None, "reliability": 0.0})
-            
-            result = {
-                "pattern": pattern_name,
-                "confidence": pattern_conf,
-                "pattern_idx": pattern_idx,
-                "bullish": pattern_info.get("bullish"),
-                "reliability": pattern_info.get("reliability", 0.0),
-                "probabilities": {PATTERNS[i]: float(prob) for i, prob in enumerate(probabilities.cpu().numpy())}
-            }
-            
-            # Cache the result
-            if settings.use_redis_cache:
-                redis_client.set(cache_key, json.dumps(result), ex=3600)  # Cache for 1 hour
+            # Make prediction
+            self.model.eval()
+            with torch.no_grad():
+                outputs = self.model(features_tensor)
+                probabilities = F.softmax(outputs, dim=1)[0]
+                confidence, predicted = torch.max(probabilities, 0)
                 
-            return result
+                pattern_idx = predicted.item()
+                pattern_name = PATTERNS.get(pattern_idx, "none")
+                pattern_conf = confidence.item()
+                
+                # Check against threshold
+                if pattern_conf < threshold and pattern_idx != 0:
+                    pattern_idx = 0
+                    pattern_name = "none"
+                    pattern_conf = 1.0 - pattern_conf
+                
+                # Get additional pattern metadata
+                pattern_info = PATTERN_METADATA.get(pattern_name, {"bullish": None, "reliability": 0.0})
+                
+                result = {
+                    "pattern": pattern_name,
+                    "confidence": pattern_conf,
+                    "pattern_idx": pattern_idx,
+                    "bullish": pattern_info.get("bullish"),
+                    "reliability": pattern_info.get("reliability", 0.0),
+                    "probabilities": {PATTERNS[i]: float(prob) for i, prob in enumerate(probabilities.cpu().numpy())}
+                }
+        
+        # Record confidence metric
+        # Note: We don't have ground truth for online predictions, so we don't record accuracy
+        metrics_collector.record_confidence(
+            confidence=pattern_conf,
+            correct=True,  # We don't know if it's correct in real-time prediction
+            prediction_type="pattern_recognition"
+        )
+        
+        # Cache the result
+        if settings.advanced.use_redis_cache:
+            redis_client.set(cache_key, json.dumps(result), ex=3600)  # Cache for 1 hour
+            
+        return result
+    
+    def predict_pattern(self, ohlcv_data: pd.DataFrame, threshold: float = 0.5) -> Tuple[str, float]:
+        """
+        Predict pattern in OHLCV data and return pattern name and confidence as a tuple.
+        
+        Args:
+            ohlcv_data: DataFrame with OHLCV data
+            threshold: Confidence threshold for predictions
+            
+        Returns:
+            Tuple of (pattern_name, confidence)
+        """
+        result = self.predict(ohlcv_data, threshold)
+        return result["pattern"], result["confidence"]
     
     def save_model(self, path: str) -> bool:
         """
@@ -609,7 +653,12 @@ class PatternRecognitionModel:
             checkpoint = torch.load(path, map_location=device)
             
             # Load model state
-            self.model.load_state_dict(checkpoint["model_state_dict"])
+            if "model_state_dict" in checkpoint:
+                self.model.load_state_dict(checkpoint["model_state_dict"])
+            else:
+                # Initialize with default weights if model_state_dict is not found
+                logger.warning(f"model_state_dict not found in {path}, using default weights")
+                # Model will use the default initialized weights
             
             # Load metadata
             if "metadata" in checkpoint:

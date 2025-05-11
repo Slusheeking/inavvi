@@ -58,7 +58,7 @@ class DatabaseSettings(BaseSettings):
 class LLMSettings(BaseSettings):
     """LLM configuration settings."""
 
-    model: str = Field("anthropic/claude-3-haiku-20240307", env="LLM_MODEL")
+    model: str = Field("google/gemini-2.0-flash-001", env="LLM_MODEL")
     max_tokens: int = Field(4096, env="LLM_MAX_TOKENS")
     temperature: float = Field(0.1, env="LLM_TEMPERATURE")
 
@@ -157,6 +157,7 @@ class AdvancedSettings(BaseSettings):
     """Advanced configuration settings."""
 
     use_gpu: bool = Field(False, env="USE_GPU")
+    use_redis_cache: bool = Field(True, env="USE_REDIS_CACHE")
 
     model_config = {
         "env_file": ".env",

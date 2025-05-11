@@ -296,7 +296,7 @@ class SACAgent:
                 logger.info("Loaded combined actor-critic model")
             else:
                 logger.warning(f"No recognized state dict keys found in {path}")
-                return False
+                # Continue with default model initialization instead of failing
             
             try:
                 if "target_value_state_dict" in checkpoint:

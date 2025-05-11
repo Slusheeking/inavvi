@@ -134,22 +134,25 @@ class RedisClient:
 
     # ---------- General Key-Value Operations ----------
 
-    def set(self, key: str, value: Any, expiry: Optional[int] = None) -> bool:
+    def set(self, key: str, value: Any, expiry: Optional[int] = None, ex: Optional[int] = None) -> bool:
         """
         Set a key-value pair in Redis.
 
         Args:
             key: Key to set
             value: Value to set
-            expiry: Optional expiry time in seconds
+            expiry: Optional expiry time in seconds (deprecated, use ex instead)
+            ex: Optional expiry time in seconds
 
         Returns:
             True if successful, False otherwise
         """
         try:
             serialized = self._serialize(value)
-            if expiry:
-                return self._conn.setex(key, expiry, serialized)
+            # Use ex if provided, otherwise use expiry
+            expiration = ex if ex is not None else expiry
+            if expiration:
+                return self._conn.setex(key, expiration, serialized)
             else:
                 return self._conn.set(key, serialized)
         except Exception as e:

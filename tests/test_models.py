@@ -116,7 +116,7 @@ class TestTradingSystem(unittest.TestCase):
         df['volume'] = np.random.randint(50000, 5000000, num_days)
         
         # Fix any NaN values
-        df = df.fillna(method='ffill').fillna(method='bfill')
+        df = df.ffill().bfill()
         
         # Add technical indicators
         # Moving averages
@@ -176,7 +176,7 @@ class TestTradingSystem(unittest.TestCase):
         df['bb_percent'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
         
         # Fill NaN values
-        df = df.fillna(method='ffill').fillna(0)
+        df = df.ffill().fillna(0)
         
         return df
     
@@ -391,7 +391,12 @@ class TestTradingSystem(unittest.TestCase):
         # Clean up test data directory
         if os.path.exists("./test_data"):
             for file in os.listdir("./test_data"):
-                os.remove(os.path.join("./test_data", file))
+                file_path = os.path.join("./test_data", file)
+                if os.path.isdir(file_path):
+                    import shutil
+                    shutil.rmtree(file_path)
+                else:
+                    os.remove(file_path)
             os.rmdir("./test_data")
         
         print("Test cleanup complete.")
