@@ -257,7 +257,7 @@ class TradeExecutor:
                     position_data = {
                         "symbol": position.symbol,
                         "entry_price": float(position.avg_entry_price),
-                        "entry_time": pd.Timestamp(position.created_at).isoformat(),
+                        "entry_time": datetime.now().isoformat(),  # Use current time instead of position.created_at
                         "quantity": float(position.qty),
                         "side": "long" if float(position.qty) > 0 else "short",
                         "current_price": float(position.current_price),
@@ -413,7 +413,8 @@ class TradeExecutor:
             price_data = await data_pipeline.get_stock_data(symbol, "snapshot")
             current_price = price_data.get("price", {}).get("last", 0) if price_data else 0
 
-            if current_price <= 0:
+            # Ensure current_price is a number and not None
+            if current_price is None or current_price <= 0:
                 logger.error(f"Invalid price for {symbol}: {current_price}")
                 return False
 

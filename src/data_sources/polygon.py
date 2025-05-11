@@ -121,6 +121,86 @@ class PolygonAPI:
     # ---------- REST API Methods ----------
 
     @retry_async(attempts=3, delay=5)
+    async def get_market_snapshot(self, symbols: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+        """
+        Get a snapshot of multiple stocks using the full market snapshot endpoint.
+        
+        Args:
+            symbols: Optional list of symbols to get snapshots for. If None, gets all tickers.
+            
+        Returns:
+            Dictionary mapping symbols to their snapshot data
+        """
+        try:
+            # Prepare the tickers parameter
+            tickers_param = ",".join(symbols) if symbols else ""
+            
+            # Make the request to the full market snapshot endpoint
+            url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"
+            params = {
+                "apiKey": self.api_key,
+                "tickers": tickers_param,
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # Process the response
+                        result = {}
+                        if "tickers" in data and isinstance(data["tickers"], list):
+                            for ticker_data in data["tickers"]:
+                                if "ticker" in ticker_data:
+                                    symbol = ticker_data["ticker"]
+                                    
+                                    # Format the data to match our existing format
+                                    formatted_data = {
+                                        "symbol": symbol,
+                                        "price": {
+                                            "last": None,
+                                            "open": None,
+                                            "high": None,
+                                            "low": None,
+                                            "close": None,
+                                            "volume": None,
+                                            "change_pct": ticker_data.get("todaysChangePerc", None),
+                                        },
+                                        "timestamp": pd.Timestamp.now().isoformat(),
+                                    }
+                                    
+                                    # Extract last trade price
+                                    if "lastTrade" in ticker_data and "p" in ticker_data["lastTrade"]:
+                                        formatted_data["price"]["last"] = ticker_data["lastTrade"]["p"]
+                                    
+                                    # Extract day data
+                                    if "day" in ticker_data:
+                                        day = ticker_data["day"]
+                                        formatted_data["price"]["open"] = day.get("o", None)
+                                        formatted_data["price"]["high"] = day.get("h", None)
+                                        formatted_data["price"]["low"] = day.get("l", None)
+                                        formatted_data["price"]["close"] = day.get("c", None)
+                                        formatted_data["price"]["volume"] = day.get("v", None)
+                                    
+                                    # Extract previous day close
+                                    if "prevDay" in ticker_data and "c" in ticker_data["prevDay"]:
+                                        formatted_data["price"]["close"] = ticker_data["prevDay"]["c"]
+                                    
+                                    # Store in result dictionary
+                                    result[symbol] = formatted_data
+                                    
+                                    # Cache in Redis
+                                    redis_client.set_stock_data(symbol, formatted_data, "price")
+                        
+                        return result
+                    else:
+                        logger.error(f"Error fetching market snapshot: {response.status}")
+                        return {}
+        except Exception as e:
+            logger.error(f"Error fetching market snapshot: {e}")
+            return {}
+    
+    @retry_async(attempts=3, delay=5)
     async def get_stock_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
         Get a snapshot of current stock data.
@@ -145,7 +225,7 @@ class PolygonAPI:
                         snapshot = self.rest_client.get_ticker_snapshot(symbol)
                     # Try using get_snapshot_ticker if available
                     elif hasattr(self.rest_client, "get_snapshot_ticker"):
-                        snapshot = self.rest_client.get_snapshot_ticker(symbol)
+                        snapshot = self.rest_client.get_snapshot_ticker(ticker=symbol, market_type="stocks")
                     # Try using list_tickers with the specific symbol
                     elif hasattr(self.rest_client, "list_tickers"):
                         tickers = list(self.rest_client.list_tickers(ticker=symbol, limit=1))
@@ -198,7 +278,12 @@ class PolygonAPI:
                 
                 # Extract data based on the structure of the snapshot
                 # Case 1: Standard ticker snapshot format
-                if hasattr(snapshot, "ticker") and hasattr(snapshot, "ticker") and snapshot.ticker:
+                if isinstance(snapshot, str):
+                    # Handle case where snapshot is a string
+                    data["symbol"] = symbol
+                    data["price"]["last"] = 0
+                    logger.warning(f"Snapshot for {symbol} is a string: {snapshot}")
+                elif hasattr(snapshot, "ticker") and snapshot.ticker and not isinstance(snapshot.ticker, str):
                     data["symbol"] = snapshot.ticker.ticker
                     
                     if hasattr(snapshot.ticker, "last") and snapshot.ticker.last:

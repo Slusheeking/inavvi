@@ -10,11 +10,10 @@ This module provides functionality for generating datasets for testing:
 
 import os
 import json
-import asyncio
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, time
-from typing import Dict, List, Tuple, Any, Optional, Union
+from datetime import datetime, time
+from typing import Dict, List, Any, Optional, Union
 
 from src.config.settings import settings
 from src.utils.logging import setup_logger
@@ -793,11 +792,39 @@ class DatasetGenerator:
         # Create file path
         file_path = os.path.join(self.data_dir, f"{dataset_name}.json")
         
+        # Convert dataset to JSON serializable format
+        serializable_dataset = self._make_json_serializable(dataset)
+        
         # Save as JSON
         with open(file_path, 'w') as f:
-            json.dump(dataset, f, indent=2)
+            json.dump(serializable_dataset, f, indent=2)
         
         logger.info(f"Saved dataset to {file_path}")
+    
+    def _make_json_serializable(self, obj: Any) -> Any:
+        """
+        Convert an object to a JSON serializable format.
+        
+        Args:
+            obj: Object to convert
+            
+        Returns:
+            JSON serializable object
+        """
+        if isinstance(obj, dict):
+            return {k: self._make_json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_json_serializable(item) for item in obj]
+        elif isinstance(obj, (pd.Timestamp, datetime)):
+            return obj.isoformat()
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj
 
     def load_dataset(self, dataset_name: str) -> Optional[Dict[str, Any]]:
         """

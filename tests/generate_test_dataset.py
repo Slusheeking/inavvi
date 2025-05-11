@@ -67,11 +67,17 @@ async def main():
             print("No datasets available")
         return
     
-    # Set date (default to 7 days ago)
+    # Set date (default to 7 days ago, but ensure it's a weekday)
     if args.date:
         date = args.date
     else:
-        date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        # Get date from 7 days ago
+        date_obj = datetime.now() - timedelta(days=7)
+        # If it's a weekend, move to the previous Friday
+        if date_obj.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+            days_to_subtract = date_obj.weekday() - 4  # Move to Friday
+            date_obj = date_obj - timedelta(days=days_to_subtract)
+        date = date_obj.strftime("%Y-%m-%d")
     
     # Set dataset name (default based on date and time of day)
     if args.name:
@@ -89,11 +95,19 @@ async def main():
     logger.info(f"Symbols: {symbols}")
     logger.info(f"Data source: {args.data_source}")
     
+    # Generate dataset with a date range to ensure we get data
+    # Use a 3-day window to increase chances of getting data
+    start_date_obj = datetime.strptime(date, "%Y-%m-%d")
+    end_date_obj = start_date_obj + timedelta(days=2)
+    end_date = end_date_obj.strftime("%Y-%m-%d")
+    
+    print(f"Fetching data from {date} to {end_date}")
+    
     # Generate dataset
     dataset = await dataset_generator.generate_dataset(
         symbols=symbols,
         start_date=date,
-        end_date=None,  # Use start_date as end_date
+        end_date=end_date,  # Use a 3-day window
         time_of_day=args.time_of_day,
         data_source=args.data_source,
         include_news=not args.no_news,

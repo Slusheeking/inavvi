@@ -1064,7 +1064,7 @@ class AlphaVantageAPI:
                 # Try to clean the value column
                 df["value"] = pd.to_numeric(df["value"], errors="coerce")
                 # Fill missing values with forward fill then backward fill
-                df["value"] = df["value"].fillna(method="ffill").fillna(method="bfill")
+                df["value"] = df["value"].ffill().bfill()
 
                 if df["value"].isnull().all():
                     logger.error(f"No valid values in economic indicator data for {indicator}")
@@ -1180,7 +1180,7 @@ class AlphaVantageAPI:
                 # Try to clean the value column
                 df["value"] = pd.to_numeric(df["value"], errors="coerce")
                 # Fill missing values with forward fill then backward fill
-                df["value"] = df["value"].fillna(method="ffill").fillna(method="bfill")
+                df["value"] = df["value"].ffill().bfill()
 
                 if df["value"].isnull().all():
                     logger.error(f"No valid values in treasury yield data for {maturity}")

@@ -47,13 +47,19 @@ from src.training.data_fetcher import DataFetcher
 logger = setup_logger("model_training")
 
 # Import models
-# Fix import path for sentiment_model
 try:
     from src.models.sentiment import sentiment_model, train_sentiment_model
 except ImportError:
     logger.error("Could not import sentiment_model. Check the module path.")
     sentiment_model = None
     train_sentiment_model = None
+
+# Import exit optimization model
+try:
+    from src.models.exit_optimization import train_exit_model
+except ImportError:
+    logger.error("Could not import exit_optimization model. Check the module path.")
+    train_exit_model = None
 
 # Log schedule import status
 if schedule is None:
